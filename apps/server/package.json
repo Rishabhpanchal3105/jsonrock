@@ -20,6 +20,7 @@
   "dependencies": {
     "@clerk/backend": "^3.16.7",
     "@clerk/express": "^2.1.58",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@types/jsdom": "^30.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -36,7 +37,8 @@
     "resend": "^6.22.1",
     "socket.io": "^4.7.5",
     "svix": "^1.99.1",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

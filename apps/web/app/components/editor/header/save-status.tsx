@@ -1,5 +1,4 @@
 import { ShareType } from '@/app/iterface'
-import { cn } from '@/lib/utils'
 import { Check, Loader2 } from 'lucide-react'
 
 interface SaveStatusProps {
@@ -7,13 +6,10 @@ interface SaveStatusProps {
   documentType: ShareType
 }
 
-const SaveStatus = ({ isAutoSaving, documentType }: SaveStatusProps) => {
+const SaveStatus = ({ isAutoSaving }: SaveStatusProps) => {
   return (
     <div
-      className={cn(
-        'flex items-center gap-1.5 px-1.5 sm:px-3 text-xs font-medium text-zinc-500 select-none',
-        documentType !== 'text' && 'dark:text-zinc-400'
-      )}
+      className='flex items-center gap-1.5 px-1.5 sm:px-3 text-xs font-medium text-zinc-500 select-none dark:text-zinc-400'
       title={isAutoSaving ? 'Saving...' : 'Saved'}
     >
       {isAutoSaving ? (

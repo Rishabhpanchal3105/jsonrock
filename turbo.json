@@ -15,7 +15,8 @@
         "MONGODB_URI",
         "CLERK_SECRET_KEY",
         "CLERK_PUBLISHABLE_KEY",
-        "CLERK_WEBHOOK_SECRET"
+        "CLERK_WEBHOOK_SECRET",
+        "SITE_URL"
       ]
     },
     "check-types": {

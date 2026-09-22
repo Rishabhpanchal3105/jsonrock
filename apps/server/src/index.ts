@@ -6,6 +6,8 @@ import { Server } from 'socket.io'
 import { connectDB } from './db/conn'
 import shareRoutes from './routes/share.routes'
 import webhookRoutes from './routes/webhook.routes'
+import mcpTokenRoutes from './routes/mcp-token.routes'
+import { createMcpRouter } from './mcp/http'
 import morgan from 'morgan'
 import logger from './config/logger'
 import globalErrorHandler from './middleware/errorLogger'
@@ -27,8 +29,11 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }))
 
 app.use(morgan('dev'))
 
-// Routes
+// Routes. MCP token routes are mounted before the share router so /api/mcp
+// is not captured by the share slug handler.
+app.use('/api/mcp', mcpTokenRoutes)
 app.use('/api', shareRoutes)
+app.use('/mcp', createMcpRouter())
 
 connectDB()
 

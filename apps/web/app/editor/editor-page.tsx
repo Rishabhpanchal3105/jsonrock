@@ -389,7 +389,6 @@ export default function Home({
     isJsonValid &&
     (!monacoValidationError || monacoValidationError.severity !== 'error')
 
-
   // Split state:
   // 1. currentJsonContent = Source of Truth for Saving/Graph (Updated by local typing)
   // 2. syncedRemoteContent = Source of Truth for Editor Display (Updated ONLY by Socket/System)
@@ -441,7 +440,6 @@ export default function Home({
     !isCurrentUserOwner &&
     Boolean(urlSlug || documentSlug)
 
-
   // Helper to determine ownership (moved before canEdit initialization)
   const checkOwnership = useCallback((targetSlug: string) => {
     const ownedSlugs = Cookies.get('json-rock-owned')
@@ -466,6 +464,26 @@ export default function Home({
     if (isOwned) return true // Owner always can edit
     return initialRecord.accessType === 'editor' // Non-owner: check accessType
   })
+
+  // Account ownership is canonical for documents created outside this browser
+  // (for example through the JSON Rock MCP server). The local owned-slugs cookie
+  // is only a fallback for anonymous and legacy documents.
+  useEffect(() => {
+    if (!isAuthLoaded || !isUserLoaded || !documentOwnerId) return
+
+    const ownsDocument = Boolean(
+      isSignedIn && clerkUserId && clerkUserId === documentOwnerId
+    )
+    setIsCurrentUserOwner(ownsDocument)
+    setHasEditPermission(ownsDocument || userAccessLevel === 'editor')
+  }, [
+    isAuthLoaded,
+    isUserLoaded,
+    isSignedIn,
+    clerkUserId,
+    documentOwnerId,
+    userAccessLevel,
+  ])
 
   const [documentPassword, setDocumentPassword] = useState(
     cachedRootSession?.documentPassword ?? ''
@@ -495,9 +513,9 @@ export default function Home({
     if (cachedRootSession && !cachedRootSession.isPasswordLocked) return false
     return Boolean(
       initialRecord?.isPrivate &&
-        !initialRecord?.json &&
-        initialRecord?.schemaVersion !== 1 &&
-        !initialRecord?.isLegacyPlaintext
+      !initialRecord?.json &&
+      initialRecord?.schemaVersion !== 1 &&
+      !initialRecord?.isLegacyPlaintext
     )
   })
   /** Bumps when private ciphertext is ready so owner-unlock can re-run safely. */
@@ -872,13 +890,7 @@ export default function Home({
     restoreSessionUrl(cached)
     lastRootNavKeyRef.current = `root:${featureMode}`
     setIsPageLoading(false)
-  }, [
-    urlSlug,
-    initialRecord,
-    featureMode,
-    applyTabSnapshot,
-    restoreSessionUrl,
-  ])
+  }, [urlSlug, initialRecord, featureMode, applyTabSnapshot, restoreSessionUrl])
 
   // Initial SSR Hydration & Key Decryption
   useEffect(() => {
@@ -2136,7 +2148,6 @@ export default function Home({
     ]
   )
 
-
   const openAuthModal = useCallback(
     (options?: {
       pendingSettings?: {
@@ -2615,8 +2626,7 @@ export default function Home({
     <div
       className={cn(
         'flex h-dvh w-screen bg-gray-50 text-zinc-800 font-sans overflow-hidden',
-        documentType !== 'text' &&
-          'dark:bg-zinc-950 dark:text-zinc-300 relative'
+        'dark:bg-zinc-950 dark:text-zinc-300 relative'
       )}
     >
       {(isPageLoading || isOwnerUnlockPending) && !isPasswordLocked && (
@@ -2679,8 +2689,7 @@ export default function Home({
               }
               className={cn(
                 'border-b lg:border-b-0 lg:border-r border-zinc-200 flex flex-col bg-white h-full min-h-0',
-                documentType === 'json' &&
-                  'dark:border-zinc-900 dark:bg-[#09090b]',
+                'dark:border-zinc-900 dark:bg-[#09090b]',
                 documentType !== 'json'
                   ? 'w-full'
                   : 'w-full lg:w-(--left-panel-width) lg:min-w-75',
@@ -2694,7 +2703,7 @@ export default function Home({
                     onChange={onJsonContentChange}
                     readOnly={!hasEditPermission}
                     remoteContent={syncedRemoteContent?.code}
-                    forceLightMode={true}
+                    forceLightMode={false}
                     isCurrentUserOwner={isCurrentUserOwner}
                     slug={documentSlug}
                   />
@@ -3102,14 +3111,14 @@ export default function Home({
         title={alertState.title}
         message={alertState.message}
         type={alertState.type}
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
 
       <Toast
         isOpen={toastState.isOpen}
         message={toastState.message}
         onClose={() => setToastState((prev) => ({ ...prev, isOpen: false }))}
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
 
       {/* Upload Modal */}
@@ -3192,44 +3201,16 @@ export default function Home({
 
       {/* Decryption Error Modal */}
       {decryptionError && (
-        <div
-          className={cn(
-            'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4',
-            documentType === 'text'
-              ? 'bg-white/80'
-              : 'bg-white/80 dark:bg-black/80'
-          )}
-        >
-          <div
-            className={cn(
-              'w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl animate-in zoom-in-95',
-              documentType === 'text'
-                ? 'bg-white border-red-200'
-                : 'bg-white dark:bg-zinc-950 border-red-200 dark:border-red-900/40'
-            )}
-          >
+        <div className='fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 bg-white/80 dark:bg-black/80'>
+          <div className='w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl animate-in zoom-in-95 bg-white dark:bg-zinc-950 border-red-200 dark:border-red-900/40'>
             <div className='flex flex-col items-center gap-2 text-center'>
               <div className='flex h-12 w-12 items-center justify-center rounded-full border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 text-red-500'>
                 <Lock size={20} />
               </div>
-              <h2
-                className={cn(
-                  'text-lg font-semibold',
-                  documentType === 'text'
-                    ? 'text-zinc-900'
-                    : 'text-zinc-900 dark:text-zinc-100'
-                )}
-              >
+              <h2 className='text-lg font-semibold text-zinc-900 dark:text-zinc-100'>
                 Decryption Failed
               </h2>
-              <p
-                className={cn(
-                  'text-sm leading-relaxed',
-                  documentType === 'text'
-                    ? 'text-zinc-600'
-                    : 'text-zinc-600 dark:text-zinc-400'
-                )}
-              >
+              <p className='text-sm leading-relaxed text-zinc-600 dark:text-zinc-400'>
                 {decryptionError}
               </p>
             </div>
@@ -3248,51 +3229,16 @@ export default function Home({
 
       {/* Unlock Modal — wait for owner-unlock check so owners never see a flash */}
       {isPasswordLocked && !isOwnerUnlockPending && !decryptionError && (
-        <div
-          className={cn(
-            'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4',
-            documentType === 'text'
-              ? 'bg-white/80'
-              : 'bg-white/80 dark:bg-black/80'
-          )}
-        >
-          <div
-            className={cn(
-              'w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl',
-              documentType === 'text'
-                ? 'bg-white border-zinc-200'
-                : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800'
-            )}
-          >
+        <div className='fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 bg-white/80 dark:bg-black/80'>
+          <div className='w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800'>
             <div className='flex flex-col items-center gap-2 text-center'>
-              <div
-                className={cn(
-                  'flex h-12 w-12 items-center justify-center rounded-full border',
-                  documentType === 'text'
-                    ? 'bg-zinc-100 border-zinc-200 text-zinc-500'
-                    : 'bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
-                )}
-              >
+              <div className='flex h-12 w-12 items-center justify-center rounded-full border bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'>
                 <Lock size={20} />
               </div>
-              <h2
-                className={cn(
-                  'text-lg font-semibold',
-                  documentType === 'text'
-                    ? 'text-zinc-900'
-                    : 'text-zinc-900 dark:text-zinc-100'
-                )}
-              >
+              <h2 className='text-lg font-semibold text-zinc-900 dark:text-zinc-100'>
                 Password Required
               </h2>
-              <p
-                className={cn(
-                  'text-sm',
-                  documentType === 'text'
-                    ? 'text-zinc-500'
-                    : 'text-zinc-500 dark:text-zinc-400'
-                )}
-              >
+              <p className='text-sm text-zinc-500 dark:text-zinc-400'>
                 This shared link is password protected. Please enter the
                 password to view.
               </p>
@@ -3305,12 +3251,7 @@ export default function Home({
                   placeholder='Enter password'
                   value={documentPassword}
                   onChange={(e) => setDocumentPassword(e.target.value)}
-                  className={cn(
-                    'w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/50 pr-10',
-                    documentType === 'text'
-                      ? 'bg-white border-zinc-200 text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500'
-                      : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-emerald-500'
-                  )}
+                  className='w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/50 pr-10 bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-emerald-500'
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleUnlockDocument()
                   }}
@@ -3318,11 +3259,7 @@ export default function Home({
                 <button
                   type='button'
                   onClick={() => setIsPasswordVisible(!isPasswordVisible)}
-                  className={cn(
-                    'absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-700 transition-colors',
-                    documentType !== 'text' &&
-                      'dark:text-zinc-400 dark:hover:text-zinc-200'
-                  )}
+                  className='absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:text-zinc-200'
                 >
                   {isPasswordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -3337,12 +3274,7 @@ export default function Home({
               <div className='flex items-center gap-3'>
                 <button
                   onClick={cancelUnlockAttempt}
-                  className={cn(
-                    'flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors',
-                    documentType === 'text'
-                      ? 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900'
-                      : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
-                  )}
+                  className='flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
                 >
                   Cancel
                 </button>
@@ -3370,7 +3302,7 @@ export default function Home({
         onDeleteDocument={handleDeleteLocalDocument}
         onClearAll={handleClearLocalDocuments}
         onRenameDocument={handleRenameLocalDocument}
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
 
       <SharePopover
@@ -3404,7 +3336,7 @@ export default function Home({
               }`
             : ''
         }
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
     </div>
   )

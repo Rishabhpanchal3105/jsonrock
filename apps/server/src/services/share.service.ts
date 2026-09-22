@@ -23,6 +23,7 @@ interface CreateShareInput {
   type?: ShareType
   slug?: string
   ownerId?: string
+  contentKeyWrapped?: string | null
 }
 
 export class ShareService {
@@ -68,6 +69,7 @@ export class ShareService {
         input.isPrivate && input.ownerKeyWrapped
           ? input.ownerKeyWrapped
           : undefined,
+      contentKeyWrapped: input.contentKeyWrapped || undefined,
       mode: input.mode || ModeEnum.FORMATTER,
       isPrivate: input.isPrivate,
       accessType: input.accessType || AccessTypeEnum.VIEWER,
@@ -117,6 +119,10 @@ export class ShareService {
 
     if (input.type) {
       updateDoc.type = input.type
+    }
+
+    if (input.contentKeyWrapped !== undefined) {
+      updateDoc.contentKeyWrapped = input.contentKeyWrapped
     }
 
     // Public docs never keep an owner wrap; private docs update only when provided.
