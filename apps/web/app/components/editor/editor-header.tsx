@@ -11,7 +11,9 @@ import {
   GitCompareArrows,
   History,
   Home,
+  KeyRound,
   LinkIcon,
+  Loader2,
   MoreHorizontal,
 } from 'lucide-react'
 import { ThemeToggle } from '../button/theme-toggle'
@@ -19,7 +21,9 @@ import HeaderLogo from './header/header-logo'
 import SaveStatus from './header/save-status'
 import EditorActionBtn from '../button/editor-action-btn'
 import Link from 'next/link'
+import Image from 'next/image'
 import { FaGithub } from 'react-icons/fa6'
+import { UserButton, useUser } from '@clerk/nextjs'
 import {
   useCallback,
   useEffect,
@@ -42,6 +46,8 @@ interface Props {
   onOpenShareModal: (x: boolean) => void
   onOpenUploadModal: (x: boolean) => void
   onOpenHistoryModal: (x: boolean) => void
+  /** Shared markdown preview-only: hide editor creation nav; show view-only cue. */
+  previewOnlyView?: boolean
 }
 
 type HeaderAction = {
@@ -98,11 +104,10 @@ const HEADER_ACTIONS: HeaderAction[] = [
 
 const GAP_PX = 8
 
-const iconBtnClass = (documentType: ShareType) =>
+const iconBtnClass = () =>
   cn(
     'p-2 rounded-md transition-all focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 hover:cursor-pointer',
-    documentType !== 'text' &&
-      'dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-800'
+    'dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-800'
   )
 
 const EditorHeader = ({
@@ -113,7 +118,9 @@ const EditorHeader = ({
   onOpenShareModal,
   currentViewMode,
   onOpenHistoryModal,
+  previewOnlyView = false,
 }: Props) => {
+  const { isSignedIn, isLoaded: isUserLoaded } = useUser()
   const [isPending, startTransition] = useTransition()
   const [isOtherOpen, setIsOtherOpen] = useState(false)
   const [visibleCount, setVisibleCount] = useState(HEADER_ACTIONS.length)
@@ -282,8 +289,7 @@ const EditorHeader = ({
         ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-900/20'
         : cn(
             'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200',
-            documentType !== 'text' &&
-              'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+            'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
           )
     )
 
@@ -293,8 +299,7 @@ const EditorHeader = ({
       ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-900/20'
       : cn(
           'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200',
-          documentType !== 'text' &&
-            'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+          'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
         )
   )
 
@@ -303,14 +308,14 @@ const EditorHeader = ({
       ref={headerRef}
       className={cn(
         'relative h-14 border-b border-zinc-200 flex items-center justify-between gap-2 px-2 sm:px-3 lg:px-6 bg-white shrink-0',
-        documentType !== 'text' && 'dark:border-zinc-900 dark:bg-zinc-950'
+        'dark:border-zinc-900 dark:bg-zinc-950'
       )}
     >
       {/* Hidden measurement row */}
       <div
         ref={measureRef}
         aria-hidden
-        className='pointer-events-none absolute -left-[9999px] top-0 flex items-center gap-2 opacity-0'
+        className='pointer-events-none absolute -left-2499.75 top-0 flex items-center gap-2 opacity-0'
       >
         {HEADER_ACTIONS.map((action) => (
           <div
@@ -329,7 +334,7 @@ const EditorHeader = ({
         </div>
       </div>
 
-      {/* Left: logo only */}
+      {/* Left: logo */}
       <div
         ref={leftRef}
         className='flex items-center gap-2 sm:gap-3 z-10 min-w-0 shrink-0'
@@ -342,48 +347,56 @@ const EditorHeader = ({
         />
       </div>
 
-      {/* Center: always space-aware — buttons leave Other when they fit */}
-      <div className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2'>
-        {visibleActions.map((action) => (
-          <EditorActionBtn
-            key={action.id}
-            href={action.href}
-            documentType={documentType}
-            label={action.label}
-            title={action.title}
-            icon={action.icon}
-            isActive={
-              action.activeType !== undefined &&
-              documentType === action.activeType
-            }
-          />
-        ))}
-
-        {showOther && (
-          <button
-            ref={otherBtnRef}
-            type='button'
-            onClick={() => {
-              updateMenuPosition()
-              setIsOtherOpen((open) => !open)
-            }}
-            aria-expanded={isOtherOpen}
-            aria-haspopup='menu'
-            aria-label='Other tools'
-            className={otherTriggerClass}
-          >
-            <MoreHorizontal size={14} />
-            <span className='hidden lg:inline'>Other</span>
-            <ChevronDown
-              size={12}
-              className={cn(
-                'transition-transform',
-                isOtherOpen && 'rotate-180'
-              )}
+      {/* Center: editor nav — hidden for preview-only shared markdown */}
+      {previewOnlyView ? (
+        <div className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2'>
+          <span className='text-xs font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500'>
+            View only
+          </span>
+        </div>
+      ) : (
+        <div className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2'>
+          {visibleActions.map((action) => (
+            <EditorActionBtn
+              key={action.id}
+              href={action.href}
+              documentType={documentType}
+              label={action.label}
+              title={action.title}
+              icon={action.icon}
+              isActive={
+                action.activeType !== undefined &&
+                documentType === action.activeType
+              }
             />
-          </button>
-        )}
-      </div>
+          ))}
+
+          {showOther && (
+            <button
+              ref={otherBtnRef}
+              type='button'
+              onClick={() => {
+                updateMenuPosition()
+                setIsOtherOpen((open) => !open)
+              }}
+              aria-expanded={isOtherOpen}
+              aria-haspopup='menu'
+              aria-label='Other tools'
+              className={otherTriggerClass}
+            >
+              <MoreHorizontal size={14} />
+              <span className='hidden lg:inline'>Other</span>
+              <ChevronDown
+                size={12}
+                className={cn(
+                  'transition-transform',
+                  isOtherOpen && 'rotate-180'
+                )}
+              />
+            </button>
+          )}
+        </div>
+      )}
 
       {mounted &&
         isOtherOpen &&
@@ -399,8 +412,8 @@ const EditorHeader = ({
               transform: 'translateX(-50%)',
             }}
             className={cn(
-              'z-[200] min-w-[12rem] max-w-[calc(100vw-1.5rem)] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl',
-              documentType !== 'text' && 'dark:border-zinc-800 dark:bg-zinc-950'
+              'z-200 min-w-48 max-w-[calc(100vw-1.5rem)] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl',
+              'dark:border-zinc-800 dark:bg-zinc-950'
             )}
           >
             {overflowActions.map((item) => (
@@ -411,8 +424,7 @@ const EditorHeader = ({
                 onClick={() => navigateTo(item.href)}
                 className={cn(
                   'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900 hover:cursor-pointer',
-                  documentType !== 'text' &&
-                    'dark:text-zinc-300 dark:hover:bg-zinc-900 dark:hover:text-zinc-100',
+                  'dark:text-zinc-300 dark:hover:bg-zinc-900 dark:hover:text-zinc-100',
                   item.activeType !== undefined &&
                     documentType === item.activeType &&
                     'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
@@ -436,13 +448,13 @@ const EditorHeader = ({
         <div
           className={cn(
             'h-5 w-px bg-zinc-200 mx-0.5 sm:mx-1',
-            documentType !== 'text' && 'dark:bg-zinc-800'
+            'dark:bg-zinc-800'
           )}
         />
 
         <button
           onClick={() => onOpenHistoryModal(true)}
-          className={iconBtnClass(documentType)}
+          className={iconBtnClass()}
           title='Open Local History'
           aria-label='Open Local History'
         >
@@ -450,37 +462,71 @@ const EditorHeader = ({
         </button>
 
         <button
-          onClick={() => (!documentSlug ? undefined : onOpenShareModal(true))}
-          disabled={!documentSlug}
+          onClick={() =>
+            !documentSlug || isAutoSaving ? undefined : onOpenShareModal(true)
+          }
+          disabled={!documentSlug || isAutoSaving}
           className={cn(
             'p-2 rounded-md transition-all focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none',
             !documentSlug
               ? 'text-zinc-300 dark:text-zinc-600 cursor-not-allowed opacity-50'
-              : cn(
-                  'text-emerald-600 dark:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 cursor-pointer',
-                  documentType !== 'text' && 'dark:hover:text-emerald-400'
-                )
+              : isAutoSaving
+                ? 'text-emerald-600 dark:text-emerald-400 cursor-wait opacity-80'
+                : cn(
+                    'text-emerald-600 dark:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 cursor-pointer',
+                    'dark:hover:text-emerald-400'
+                  )
           )}
-          title={!documentSlug ? 'Save document first to share' : 'Share Link'}
+          title={
+            !documentSlug
+              ? 'Save document first to share'
+              : isAutoSaving
+                ? 'Saving changes...'
+                : 'Share Link'
+          }
           aria-label={
             !documentSlug
               ? 'Share Link (disabled - save document first)'
-              : 'Share Link'
+              : isAutoSaving
+                ? 'Saving changes...'
+                : 'Share Link'
           }
         >
-          <LinkIcon size={18} />
+          {isAutoSaving && documentSlug ? (
+            <Loader2
+              size={18}
+              className='animate-spin text-emerald-600 dark:text-emerald-400'
+            />
+          ) : (
+            <LinkIcon size={18} />
+          )}
         </button>
 
-        <div className={cn(documentType !== 'text' && 'dark:text-zinc-400')}>
-          {documentType !== 'text' && <ThemeToggle />}
+        <div className='dark:text-zinc-400'>
+          <ThemeToggle />
         </div>
+
+        <Link
+          href='/account/mcp'
+          className={iconBtnClass()}
+          title='MCP — create a token for AI agents'
+          aria-label='MCP tokens'
+        >
+          <Image
+            src='/mcp.png'
+            alt=''
+            width={18}
+            height={18}
+            className='h-[18px] w-[18px] invert dark:invert-0'
+          />
+        </Link>
 
         <Link
           href='https://github.com/Softcolon-Technology/jsonrock'
           target='_blank'
           rel='noopener noreferrer'
           className={cn(
-            iconBtnClass(documentType),
+            iconBtnClass(),
             'hidden md:flex items-center justify-center'
           )}
           title='View Source on GitHub'
@@ -499,7 +545,7 @@ const EditorHeader = ({
             })
           }}
           className={cn(
-            iconBtnClass(documentType),
+            iconBtnClass(),
             'hidden sm:flex items-center justify-center'
           )}
           title='Go to Home'
@@ -507,6 +553,20 @@ const EditorHeader = ({
         >
           <Home size={18} />
         </Link>
+
+        {isSignedIn ? (
+          <div className='flex items-center ml-1'>
+            <UserButton>
+              <UserButton.MenuItems>
+                <UserButton.Link
+                  label='MCP tokens'
+                  labelIcon={<KeyRound size={16} />}
+                  href='/account/mcp'
+                />
+              </UserButton.MenuItems>
+            </UserButton>
+          </div>
+        ) : null}
       </div>
     </header>
   )

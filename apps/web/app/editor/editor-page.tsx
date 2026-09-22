@@ -1,8 +1,8 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
-import { Edge, Node } from 'reactflow'
+import type { Edge, Node } from 'reactflow'
 import {
   Code2,
   GitGraph,
@@ -12,11 +12,13 @@ import {
   Lock,
   ArrowRight,
   AlertCircle,
+  AlertTriangle,
   UploadCloud,
   X,
   Loader2,
   Eye,
   EyeOff,
+  PanelLeftOpen,
 } from 'lucide-react'
 
 import { getJsonParseError } from '@/lib/json-error'
@@ -30,9 +32,20 @@ import LocalHistoryModal from '../components/editor/local-history-modal'
 import Cookies from 'js-cookie'
 import { JsonRockLoader } from '../components/Loader'
 
-import JsonEditor from '../components/JsonEditor'
-import GraphView from '../components/GraphView'
-import TreeExplorer from '../components/TreeExplorer'
+const JsonEditor = dynamic(() => import('../components/JsonEditor'), {
+  ssr: false,
+})
+const GraphView = dynamic(() => import('../components/GraphView'), {
+  ssr: false,
+})
+const TreeExplorer = dynamic(() => import('../components/TreeExplorer'), {
+  ssr: false,
+})
+
+/** Stable Monaco options — recreating this object every render can dispose Monaco mid-update. */
+const JSON_EDITOR_INPUT_OPTIONS = {
+  padding: { top: 16, bottom: 100 },
+} as const
 import { getLayoutedElements, applyElkLayout } from '@/lib/graph-layout'
 import { useJsonWorker, TreeNodeSlim } from '@/hooks/useJsonWorker'
 import { cn } from '@/lib/utils'
@@ -43,11 +56,34 @@ import { ShareType, getEditorBasePath } from '../iterface'
 import {
   clearLocalDocuments,
   deleteLocalDocumentBySlug,
+  deriveDocumentTitle,
   getLocalDocumentBySlug,
   listLocalDocuments,
   LocalDocumentRecord,
   saveLocalDocument,
+  updateLocalDocumentTitle,
 } from '@/lib/local-docs'
+import {
+  EditorTabSnapshot,
+  getEditorTabSession,
+  patchEditorTabSession,
+  setEditorTabSession,
+} from '@/lib/editor-tab-session'
+import {
+  decryptContent,
+  deriveKeyFromPassword,
+  encryptContent,
+  extractKeyFromFragment,
+  generateDocumentKey,
+  generateSalt,
+  importKeyFromFragment,
+  setKeyInFragment,
+} from '@/lib/crypto'
+import {
+  buildOwnerKeyWrapped,
+  tryOwnerUnwrapContentKey,
+} from '@/lib/owner-key-wrap'
+import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 
 const RichTextEditor = dynamic(() => import('../components/RichTextEditor'), {
   ssr: false,
@@ -100,6 +136,29 @@ const DEFAULT_HTML_CONTENT = `<!DOCTYPE html>
 </body>
 </html>`
 
+const DEFAULT_JSON_CONTENT = `{
+  "project": "JSON ROCK",
+  "visualize": true,
+  "features": [
+    "Graph View",
+    "Tree View",
+    "Formatter"
+  ],
+  "metrics": {
+    "speed": 100,
+    "usability": "high"
+  }
+}`
+
+const DEFAULT_MARKDOWN_CONTENT = '# Hello Markdown\n\nStart typing...'
+
+function getDefaultEditorContent(type: ShareType): string {
+  if (type === 'text') return ''
+  if (type === 'markdown') return DEFAULT_MARKDOWN_CONTENT
+  if (type === 'html') return DEFAULT_HTML_CONTENT
+  return DEFAULT_JSON_CONTENT
+}
+
 export type JsonShareMode = 'visualize' | 'tree' | 'formatter'
 
 export type ShareAccessType = 'editor' | 'viewer'
@@ -108,11 +167,20 @@ export interface ShareLinkRecord {
   _id?: string
   slug: string
   type: ShareType
-  json: string // Content (json or text)
+  schemaVersion?: number
+  isLegacyPlaintext?: boolean
+  ciphertext: string
+  iv: string
+  salt?: string
+  json?: string // Content (json or text, populated after client decrypt or legacy load)
   mode: JsonShareMode
   isPrivate: boolean
   accessType?: ShareAccessType // Defaults to 'viewer' if undefined for old records
-  passwordHash?: string
+  previewOnly?: boolean
+  /** Clerk user id of the document owner (public metadata; never includes wrap secret). */
+  ownerId?: string | null
+  /** True when a wrapped owner content key exists (payload itself is not public). */
+  hasOwnerKeyWrapped?: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -122,6 +190,12 @@ type SerializedShareLinkRecord = Omit<ShareLinkRecord, 'createdAt' | '_id'> & {
   _id?: string
   accessType?: ShareAccessType
   type?: ShareType
+  schemaVersion?: number
+  isLegacyPlaintext?: boolean
+  json?: string
+  previewOnly?: boolean
+  ownerId?: string | null
+  hasOwnerKeyWrapped?: boolean
 }
 
 interface HomeProps {
@@ -146,21 +220,125 @@ export default function Home({
   const effectiveFeatureMode = initialRecord?.type || paramType || featureMode
   const effectiveViewMode = paramView || initialRecord?.mode || 'visualize'
 
-  const [currentJsonContent, setCurrentJsonContent] = useState<string>(
-    initialRecord
-      ? initialRecord.json
-      : effectiveFeatureMode === 'text'
-        ? ''
-        : effectiveFeatureMode === 'markdown'
-          ? '# Hello Markdown\n\nStart typing...'
-          : effectiveFeatureMode === 'html'
-            ? DEFAULT_HTML_CONTENT
-            : '{\n  "project": "JSON ROCK",\n  "visualize": true,\n  "features": [\n    "Graph View",\n    "Tree View",\n    "Formatter"\n  ],\n  "metrics": {\n    "speed": 100,\n    "usability": "high"\n  }\n}'
+  // Session cache for this editor type. Header tab switches remount EditorPage
+  // (different routes), so we hydrate from the in-memory store instead of defaults.
+  const cachedRootSession =
+    !urlSlug && !initialRecord
+      ? getEditorTabSession(effectiveFeatureMode)
+      : undefined
+
+  const [isLegacyDocument, setIsLegacyDocument] = useState<boolean>(
+    cachedRootSession?.isLegacyDocument ??
+      (initialRecord?.isLegacyPlaintext ||
+        initialRecord?.schemaVersion === 1 ||
+        false)
+  )
+  const [showMigrationBanner, setShowMigrationBanner] = useState<boolean>(
+    cachedRootSession?.showMigrationBanner ??
+      (initialRecord?.isLegacyPlaintext ||
+        initialRecord?.schemaVersion === 1 ||
+        false)
   )
 
+  const [currentJsonContent, setCurrentJsonContent] = useState<string>(() => {
+    if (initialRecord?.isLegacyPlaintext && initialRecord.json) {
+      return initialRecord.json
+    }
+    if (cachedRootSession) return cachedRootSession.content
+    return getDefaultEditorContent(effectiveFeatureMode)
+  })
+
   const lastPersistedContentRef = React.useRef<string>(
-    initialRecord?.json || currentJsonContent
+    cachedRootSession?.lastPersistedContent ?? currentJsonContent
   )
+
+  // Clerk Authentication state
+  const { isSignedIn, isLoaded: isUserLoaded } = useUser()
+  const { getToken, isLoaded: isAuthLoaded, userId: clerkUserId } = useAuth()
+  const { openSignIn } = useClerk()
+
+  // [AUTH-DEBUG] TEMP — every render (do not remove until live diagnosis complete)
+  console.log(Date.now(), 'auth state: editor-page', {
+    isLoaded: isUserLoaded,
+    isAuthLoaded,
+    isSignedIn,
+    userId: clerkUserId ?? null,
+  })
+
+  // [AUTH-DEBUG] TEMP — wrap fetch once to log Clerk network timing/status
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const w = window as Window & { __authDebugFetchPatched?: boolean }
+    if (w.__authDebugFetchPatched) return
+    w.__authDebugFetchPatched = true
+
+    const originalFetch = window.fetch.bind(window)
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const input = args[0]
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url
+      const isClerk = /clerk\.(com|accounts\.dev)|clerk\.|\/v1\//i.test(url)
+      const started = Date.now()
+      try {
+        const res = await originalFetch(...args)
+        if (isClerk) {
+          console.log(Date.now(), '[AUTH-DEBUG] clerk fetch', {
+            url,
+            status: res.status,
+            ok: res.ok,
+            ms: Date.now() - started,
+          })
+        }
+        return res
+      } catch (error) {
+        if (isClerk) {
+          console.log(Date.now(), '[AUTH-DEBUG] clerk fetch FAILED', {
+            url,
+            ms: Date.now() - started,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        throw error
+      }
+    }
+
+    return () => {
+      // keep patch for session; clearing flag only on full reload
+    }
+  }, [])
+
+  const pendingShareSettingsRef = React.useRef<{
+    accessLevel: ShareAccessType
+    isPrivateLink: boolean
+    sharePassword?: string
+    previewOnly?: boolean
+  } | null>(null)
+  const pendingOpenShareModalRef = React.useRef<boolean>(false)
+
+  // Web Crypto Key and E2EE state (In-memory ONLY, NEVER persisted to IndexedDB or localStorage)
+  const activeKeyRef = React.useRef<CryptoKey | null>(
+    cachedRootSession?.activeKey ?? null
+  )
+  const activeKeyStringRef = React.useRef<string | null>(
+    cachedRootSession?.activeKeyString ?? null
+  )
+  const documentSaltRef = React.useRef<string | null>(
+    initialRecord?.salt || cachedRootSession?.documentSalt || null
+  )
+  const encryptedPayloadRef = React.useRef<{
+    ciphertext: string
+    iv: string
+  } | null>(
+    initialRecord?.ciphertext && initialRecord?.iv
+      ? { ciphertext: initialRecord.ciphertext, iv: initialRecord.iv }
+      : (cachedRootSession?.encryptedPayload ?? null)
+  )
+  const [decryptionError, setDecryptionError] = useState<string | null>(null)
+  const [, setIsDecrypting] = useState<boolean>(false)
 
   // Use the new Web Worker for off-thread parsing and tree/graph building
   const {
@@ -176,7 +354,7 @@ export default function Home({
   const [parsedJsonData, setParsedJsonData] = useState<any>(null)
   const [currentViewMode, setCurrentViewMode] = useState<
     'visualize' | 'tree' | 'formatter'
-  >(effectiveViewMode)
+  >(cachedRootSession?.viewMode || effectiveViewMode)
 
   const [documentType, setDocumentType] =
     useState<ShareType>(effectiveFeatureMode)
@@ -217,7 +395,11 @@ export default function Home({
   const [syncedRemoteContent, setSyncedRemoteContent] = useState<{
     code: string
     nonce: number
-  } | null>(null)
+  } | null>(() =>
+    cachedRootSession
+      ? { code: cachedRootSession.content, nonce: Date.now() }
+      : null
+  )
 
   const [indentationSize, setIndentationSize] = useState<string>('2')
 
@@ -228,16 +410,35 @@ export default function Home({
 
   // Share State
   const [documentSlug, setDocumentSlug] = useState<string | null>(
-    initialRecord?.slug || null
+    initialRecord?.slug || cachedRootSession?.slug || null
   )
   const [isDocumentPrivate, setIsDocumentPrivate] = useState(
-    initialRecord?.isPrivate || false
+    cachedRootSession?.isDocumentPrivate ?? (initialRecord?.isPrivate || false)
+  )
+  const [isPreviewOnly, setIsPreviewOnly] = useState(
+    initialRecord?.previewOnly === true
+  )
+  const [documentOwnerId, setDocumentOwnerId] = useState<string | null>(
+    initialRecord?.ownerId ?? null
+  )
+  const [hasOwnerKeyWrapped, setHasOwnerKeyWrapped] = useState(
+    initialRecord?.hasOwnerKeyWrapped === true
   )
   const [userAccessLevel, setUserAccessLevel] = useState<ShareAccessType>(
-    initialRecord?.accessType || 'viewer'
+    cachedRootSession?.userAccessLevel || initialRecord?.accessType || 'viewer'
   )
 
-  const [isCurrentUserOwner, setIsCurrentUserOwner] = useState(false)
+  const [isCurrentUserOwner, setIsCurrentUserOwner] = useState(
+    cachedRootSession?.isCurrentUserOwner ?? false
+  )
+
+  // Shared markdown links with previewOnly: non-owners get article view only.
+  // Owners keep the full editor even when the flag is on for recipients.
+  const isMarkdownPreviewOnlyShare =
+    documentType === 'markdown' &&
+    isPreviewOnly &&
+    !isCurrentUserOwner &&
+    Boolean(urlSlug || documentSlug)
 
   // Helper to determine ownership (moved before canEdit initialization)
   const checkOwnership = useCallback((targetSlug: string) => {
@@ -257,49 +458,134 @@ export default function Home({
 
   // Initialize hasEditPermission based on initialRecord to prevent race condition
   const [hasEditPermission, setHasEditPermission] = useState(() => {
+    if (cachedRootSession) return cachedRootSession.hasEditPermission
     if (!initialRecord?.slug) return true // New document - always editable
     const isOwned = checkOwnership(initialRecord.slug)
     if (isOwned) return true // Owner always can edit
     return initialRecord.accessType === 'editor' // Non-owner: check accessType
   })
 
-  // Check ownership on load & Sync state when initialRecord changes (e.g. on navigation)
-  // Check ownership on load & Sync state when initialRecord changes (e.g. on navigation)
-  // Sync state when URL slug changes (Navigation / Refresh)
+  // Account ownership is canonical for documents created outside this browser
+  // (for example through the JSON Rock MCP server). The local owned-slugs cookie
+  // is only a fallback for anonymous and legacy documents.
+  useEffect(() => {
+    if (!isAuthLoaded || !isUserLoaded || !documentOwnerId) return
 
-  const syncFromData = useCallback(
-    (data: any) => {
-      let content = ''
-      // Handle new API structure { data: ..., type: ... }
-      if (data.type === 'json' && typeof data.data === 'object') {
-        content = JSON.stringify(data.data, null, 2)
-      } else {
-        // Fallback or Text mode
-        content = data.data || data.json || ''
+    const ownsDocument = Boolean(
+      isSignedIn && clerkUserId && clerkUserId === documentOwnerId
+    )
+    setIsCurrentUserOwner(ownsDocument)
+    setHasEditPermission(ownsDocument || userAccessLevel === 'editor')
+  }, [
+    isAuthLoaded,
+    isUserLoaded,
+    isSignedIn,
+    clerkUserId,
+    documentOwnerId,
+    userAccessLevel,
+  ])
+
+  const [documentPassword, setDocumentPassword] = useState(
+    cachedRootSession?.documentPassword ?? ''
+  )
+  const [isAutoSaving, setIsAutoSaving] = useState<boolean>(false)
+  // Track if the record is indefinitely private (persisted as private)
+  const [isPrivacyLocked, setIsPrivacyLocked] = useState(
+    cachedRootSession?.isPrivacyLocked ?? (initialRecord?.isPrivate || false)
+  )
+
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false)
+
+  // Locked State for Private Links — defer password UI until owner-unlock check finishes
+  const [isPasswordLocked, setIsPasswordLocked] = useState(() => {
+    if (cachedRootSession) return cachedRootSession.isPasswordLocked
+    if (
+      initialRecord?.isPrivate &&
+      !initialRecord?.json &&
+      initialRecord?.schemaVersion !== 1 &&
+      !initialRecord?.isLegacyPlaintext
+    ) {
+      return false
+    }
+    return Boolean(initialRecord?.isPrivate && !initialRecord?.json)
+  })
+  const [isOwnerUnlockPending, setIsOwnerUnlockPending] = useState(() => {
+    if (cachedRootSession && !cachedRootSession.isPasswordLocked) return false
+    return Boolean(
+      initialRecord?.isPrivate &&
+      !initialRecord?.json &&
+      initialRecord?.schemaVersion !== 1 &&
+      !initialRecord?.isLegacyPlaintext
+    )
+  })
+  /** Bumps when private ciphertext is ready so owner-unlock can re-run safely. */
+  const [ownerUnlockNonce, setOwnerUnlockNonce] = useState(0)
+  const [isUnlocking, setIsUnlocking] = useState(false)
+  const [unlockErrorMessage, setUnlockErrorMessage] = useState<string | null>(
+    null
+  )
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false)
+
+  /**
+   * Generates or imports the active AES-256-GCM encryption key for the current document.
+   */
+  const getOrCreateDocumentKey = useCallback(async (): Promise<{
+    key: CryptoKey
+    keyString?: string
+  }> => {
+    if (activeKeyRef.current) {
+      return {
+        key: activeKeyRef.current,
+        keyString: activeKeyStringRef.current || undefined,
       }
+    }
 
-      setCurrentJsonContent(content)
+    // Check URL fragment first
+    const fragmentKey = extractKeyFromFragment()
+    if (fragmentKey) {
+      try {
+        const key = await importKeyFromFragment(fragmentKey)
+        activeKeyRef.current = key
+        activeKeyStringRef.current = fragmentKey
+        return { key, keyString: fragmentKey }
+      } catch (e) {
+        console.error('Failed to import key from fragment', e)
+      }
+    }
+
+    // Generate new key
+    const { key, keyString } = await generateDocumentKey()
+    activeKeyRef.current = key
+    activeKeyStringRef.current = keyString
+    setKeyInFragment(keyString)
+    return { key, keyString }
+  }, [])
+
+  /**
+   * Decrypts record ciphertext and populates editor state.
+   */
+  const decryptAndApplyData = useCallback(
+    async (data: any, customPassword?: string) => {
+      setIsDecrypting(true)
+      setDecryptionError(null)
+      setUnlockErrorMessage(null)
+
+      const ciphertext = data.ciphertext || ''
+      const iv = data.iv || ''
+      const salt = data.salt || null
+      const isPrivate = data.isPrivate || false
+
+      documentSaltRef.current = salt
+      encryptedPayloadRef.current = { ciphertext, iv }
+
       setDocumentSlug(data.slug || null)
-      setIsDocumentPrivate(data.isPrivate || false)
+      setIsDocumentPrivate(isPrivate)
+      setIsPreviewOnly(data.previewOnly === true)
+      setDocumentOwnerId(data.ownerId || null)
+      setHasOwnerKeyWrapped(data.hasOwnerKeyWrapped === true)
       setUserAccessLevel(data.accessType || 'viewer')
       setDocumentType(data.type || 'json')
-      // URL param (?view=) takes priority over DB stored mode — it's the explicit user intent
       setCurrentViewMode(paramView || data.mode || 'visualize')
-      setSyncedRemoteContent({ code: content, nonce: Date.now() })
-
-      // Handle Locking
-      if (data.isPrivate) {
-        setIsPrivacyLocked(true)
-        // If content is missing/masked, it is locked.
-        const isLockedState = data.data === null || data.data === undefined
-        setIsPasswordLocked(isLockedState)
-      } else {
-        setIsPasswordLocked(false)
-        setIsPrivacyLocked(false)
-      }
-
-      // CRITICAL: Update lastSavedContent to current loaded content
-      lastPersistedContentRef.current = content
 
       if (data.slug) {
         const isOwned = checkOwnership(data.slug)
@@ -314,9 +600,192 @@ export default function Home({
         setIsCurrentUserOwner(true)
         setHasEditPermission(true)
       }
+
+      // Handle Legacy Plaintext Documents (schemaVersion missing or 1)
+      const isLegacy = Boolean(
+        data.isLegacyPlaintext || data.schemaVersion === 1
+      )
+      if (isLegacy) {
+        setIsLegacyDocument(true)
+        setShowMigrationBanner(true)
+        setIsDecrypting(false)
+
+        let content = ''
+        if (
+          data.type === 'json' &&
+          typeof data.data === 'object' &&
+          data.data !== null
+        ) {
+          content = JSON.stringify(data.data, null, 2)
+        } else {
+          content = data.data || data.json || ''
+        }
+
+        if (isPrivate) {
+          setIsPrivacyLocked(true)
+          const isLocked = data.data === null || data.data === undefined
+          setIsPasswordLocked(isLocked)
+        } else {
+          setIsPasswordLocked(false)
+          setIsPrivacyLocked(false)
+        }
+
+        if (content || !isPrivate) {
+          setCurrentJsonContent(content)
+          setSyncedRemoteContent({ code: content, nonce: Date.now() })
+          lastPersistedContentRef.current = content
+        }
+        return
+      }
+
+      setIsLegacyDocument(false)
+      setShowMigrationBanner(false)
+
+      // If empty ciphertext (newly created doc)
+      if (!ciphertext) {
+        const defaultContent = getDefaultEditorContent(data.type || 'json')
+        setCurrentJsonContent(defaultContent)
+        setSyncedRemoteContent({ code: defaultContent, nonce: Date.now() })
+        lastPersistedContentRef.current = defaultContent
+        setIsPasswordLocked(false)
+        setIsOwnerUnlockPending(false)
+        setIsPrivacyLocked(isPrivate)
+        setIsDecrypting(false)
+        return
+      }
+
+      try {
+        let key: CryptoKey | null = null
+
+        if (isPrivate) {
+          const pwd = customPassword || documentPassword
+          if (!pwd) {
+            // Defer password UI — owner may unwrap via Clerk without a prompt flash
+            setIsPrivacyLocked(true)
+            setIsPasswordLocked(false)
+            setOwnerUnlockNonce((n) => n + 1)
+            setIsOwnerUnlockPending(true)
+            setIsDecrypting(false)
+            return
+          }
+          if (!salt) {
+            throw new Error(
+              'Missing encryption salt for password-protected document'
+            )
+          }
+          key = await deriveKeyFromPassword(pwd, salt)
+          activeKeyRef.current = key
+          setIsOwnerUnlockPending(false)
+        } else {
+          const keyString = extractKeyFromFragment()
+          if (!keyString) {
+            setDecryptionError(
+              'This document is end-to-end encrypted, but no encryption key was found in the link. Please ensure your link includes the #key=... fragment.'
+            )
+            setIsDecrypting(false)
+            return
+          }
+          key = await importKeyFromFragment(keyString)
+          activeKeyRef.current = key
+          activeKeyStringRef.current = keyString
+        }
+
+        const plaintext = await decryptContent(ciphertext, iv, key)
+        setCurrentJsonContent(plaintext)
+        setSyncedRemoteContent({ code: plaintext, nonce: Date.now() })
+        lastPersistedContentRef.current = plaintext
+        setIsPasswordLocked(false)
+        setIsPrivacyLocked(isPrivate)
+        setDecryptionError(null)
+      } catch (err) {
+        console.error('Decryption failed:', err)
+        if (isPrivate) {
+          setUnlockErrorMessage('Incorrect password. Unable to decrypt.')
+          setIsPasswordLocked(true)
+        } else {
+          setDecryptionError(
+            'Failed to decrypt document. The encryption key in the URL may be invalid or corrupted.'
+          )
+        }
+      } finally {
+        setIsDecrypting(false)
+      }
     },
-    [checkOwnership]
+    [checkOwnership, documentPassword, paramView]
   )
+
+  // Owner bypass: unwrap content key via authenticated endpoint before password UI
+  useEffect(() => {
+    if (!isOwnerUnlockPending) return
+    if (!isAuthLoaded || !isUserLoaded) return
+
+    const payload = encryptedPayloadRef.current
+    // Wait until decryptAndApplyData has stored the ciphertext (avoid racing mount)
+    if (!payload?.ciphertext || !payload?.iv) return
+
+    let cancelled = false
+
+    ;(async () => {
+      const slug = documentSlug || urlSlug || initialRecord?.slug || null
+      const canTry =
+        Boolean(isSignedIn) &&
+        Boolean(clerkUserId) &&
+        Boolean(documentOwnerId) &&
+        clerkUserId === documentOwnerId &&
+        hasOwnerKeyWrapped &&
+        Boolean(slug)
+
+      if (canTry && slug) {
+        try {
+          const key = await tryOwnerUnwrapContentKey(slug, getToken)
+          if (key && !cancelled) {
+            const plaintext = await decryptContent(
+              payload.ciphertext,
+              payload.iv,
+              key
+            )
+            activeKeyRef.current = key
+            activeKeyStringRef.current = null
+            setCurrentJsonContent(plaintext)
+            setSyncedRemoteContent({ code: plaintext, nonce: Date.now() })
+            lastPersistedContentRef.current = plaintext
+            setIsPasswordLocked(false)
+            setIsPrivacyLocked(true)
+            setIsCurrentUserOwner(true)
+            setHasEditPermission(true)
+            setDecryptionError(null)
+            setIsOwnerUnlockPending(false)
+            return
+          }
+        } catch (err) {
+          console.warn('Owner key unwrap failed; falling back to password', err)
+        }
+      }
+
+      if (!cancelled) {
+        setIsPasswordLocked(true)
+        setIsPrivacyLocked(true)
+        setIsOwnerUnlockPending(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    isOwnerUnlockPending,
+    ownerUnlockNonce,
+    isAuthLoaded,
+    isUserLoaded,
+    isSignedIn,
+    clerkUserId,
+    documentOwnerId,
+    hasOwnerKeyWrapped,
+    documentSlug,
+    urlSlug,
+    initialRecord?.slug,
+    getToken,
+  ])
 
   const syncFromLocalRecord = useCallback(
     (record: LocalDocumentRecord) => {
@@ -330,6 +799,7 @@ export default function Home({
       setDocumentSlug(record.slug)
       setDocumentType(record.type)
       setIsDocumentPrivate(record.isPrivate)
+      setIsPreviewOnly(false)
       setUserAccessLevel(record.accessType)
       setCurrentViewMode(resolvedMode)
       setSyncedRemoteContent({ code: content, nonce: Date.now() })
@@ -344,30 +814,105 @@ export default function Home({
     [paramView]
   )
 
+  const applyTabSnapshot = useCallback((snapshot: EditorTabSnapshot) => {
+    setCurrentJsonContent(snapshot.content)
+    setDocumentSlug(snapshot.slug)
+    setDocumentType(snapshot.type)
+    setCurrentViewMode(snapshot.viewMode)
+    setIsDocumentPrivate(snapshot.isDocumentPrivate)
+    setUserAccessLevel(snapshot.userAccessLevel)
+    setHasEditPermission(snapshot.hasEditPermission)
+    setIsCurrentUserOwner(snapshot.isCurrentUserOwner)
+    setIsPrivacyLocked(snapshot.isPrivacyLocked)
+    setIsPasswordLocked(snapshot.isPasswordLocked)
+    setIsLegacyDocument(snapshot.isLegacyDocument)
+    setShowMigrationBanner(snapshot.showMigrationBanner)
+    setDocumentPassword(snapshot.documentPassword)
+    setSyncedRemoteContent({
+      code: snapshot.content,
+      nonce: Date.now(),
+    })
+    lastPersistedContentRef.current = snapshot.lastPersistedContent
+    activeKeyRef.current = snapshot.activeKey
+    activeKeyStringRef.current = snapshot.activeKeyString
+    documentSaltRef.current = snapshot.documentSalt
+    encryptedPayloadRef.current = snapshot.encryptedPayload
+    setDecryptionError(null)
+  }, [])
+
   // Track whether this is the first mount — SSR already provided initialRecord, no need to re-fetch
   const isInitialMountRef = React.useRef(!!initialRecord)
 
   // Ref to prevent initial fetch when we JUST created the slug via auto-save
   const justAutoSavedSlugRef = React.useRef<string | null>(null)
+  const lastRootNavKeyRef = React.useRef<string | null>(null)
+  const hydratedFromCacheRef = React.useRef(!!cachedRootSession)
+
+  const restoreSessionUrl = useCallback((snapshot: EditorTabSnapshot) => {
+    if (typeof window === 'undefined' || !snapshot.slug) return
+
+    const route = `${getEditorBasePath(snapshot.type)}/`
+    const viewParam =
+      snapshot.type === 'text' ||
+      snapshot.type === 'markdown' ||
+      snapshot.type === 'html'
+        ? ''
+        : `?view=${snapshot.viewMode}`
+    const fragment = snapshot.activeKeyString
+      ? `#key=${snapshot.activeKeyString}`
+      : ''
+    const newUrl = `${route}${snapshot.slug}${viewParam}${fragment}`
+
+    const currentPath = window.location.pathname.replace(/\/$/, '') || '/'
+    const basePath = getEditorBasePath(snapshot.type)
+    if (currentPath === basePath) {
+      justAutoSavedSlugRef.current = snapshot.slug
+      window.history.replaceState(
+        { ...window.history.state, as: newUrl, url: newUrl },
+        '',
+        newUrl
+      )
+    }
+  }, [])
+
+  // Restore this type's in-memory session before paint so tab switches don't
+  // flash default content. useState also hydrates from the same store on
+  // client remounts; this covers the case where SSR rendered defaults.
+  useLayoutEffect(() => {
+    if (urlSlug || initialRecord) return
+
+    const cached = getEditorTabSession(featureMode)
+    if (!cached) return
+
+    if (!hydratedFromCacheRef.current) {
+      applyTabSnapshot(cached)
+    }
+    restoreSessionUrl(cached)
+    lastRootNavKeyRef.current = `root:${featureMode}`
+    setIsPageLoading(false)
+  }, [urlSlug, initialRecord, featureMode, applyTabSnapshot, restoreSessionUrl])
+
+  // Initial SSR Hydration & Key Decryption
+  useEffect(() => {
+    if (initialRecord && initialRecord.slug) {
+      decryptAndApplyData(initialRecord)
+    }
+  }, []) // Mount only
 
   // Sync state when URL slug changes (Navigation / Refresh)
   useEffect(() => {
     if (urlSlug) {
-      // If we just generated this slug from typing locally, do NOT fetch from DB.
-      // This prevents a race condition where fetching overwrites the user's current unsaved keystrokes.
+      lastRootNavKeyRef.current = null
+
       if (justAutoSavedSlugRef.current === urlSlug) {
         justAutoSavedSlugRef.current = null
         return
       }
 
-      // On the very first mount, SSR already hydrated state from initialRecord — skip the fetch
       if (isInitialMountRef.current) {
         isInitialMountRef.current = false
         setIsPageLoading(false)
 
-        // CRITICAL FIX: SSR cannot access cookies, meaning initial renders on a deployed server
-        // will incorrectly default to "viewer" status for the owner.
-        // We must re-check the cookie immediately on the client side upon hydration.
         const isOwnedOnClient = checkOwnership(urlSlug)
         if (isOwnedOnClient) {
           setIsCurrentUserOwner(true)
@@ -393,7 +938,7 @@ export default function Home({
 
           const data = await res.json()
           if (data && !data.error) {
-            syncFromData(data)
+            await decryptAndApplyData(data)
             return
           }
         } catch (err) {
@@ -428,21 +973,33 @@ export default function Home({
 
       return () => controller.abort()
     } else {
-      // NAVIGATED TO ROOT (New File)
+      // NAVIGATED TO ROOT (New File) — or switched back to this editor type.
+      // Do not re-run on unrelated callback identity changes: that wipes typing.
+      const rootNavKey = `root:${featureMode}`
+      if (lastRootNavKeyRef.current === rootNavKey) {
+        setIsPageLoading(false)
+        return
+      }
+      lastRootNavKeyRef.current = rootNavKey
       isInitialMountRef.current = false
-      const defaultContent =
-        featureMode === 'text'
-          ? ''
-          : featureMode === 'markdown'
-            ? '# Hello Markdown\n\nStart typing...'
-            : featureMode === 'html'
-              ? DEFAULT_HTML_CONTENT
-              : '{\n  "project": "JSON ROCK",\n  "visualize": true,\n  "features": [\n    "Graph View",\n    "Tree View",\n    "Formatter"\n  ],\n  "metrics": {\n    "speed": 100,\n    "usability": "high"\n  }\n}'
 
-      // Reset the state to an empty un-saved document canvas
+      const cached = getEditorTabSession(featureMode)
+      if (cached) {
+        if (!hydratedFromCacheRef.current) {
+          applyTabSnapshot(cached)
+        }
+        hydratedFromCacheRef.current = false
+        restoreSessionUrl(cached)
+        setIsPageLoading(false)
+        return
+      }
+
+      const defaultContent = getDefaultEditorContent(featureMode)
+
       setCurrentJsonContent(defaultContent)
       setDocumentSlug(null)
       setIsDocumentPrivate(false)
+      setIsPreviewOnly(false)
       setUserAccessLevel('viewer')
       setDocumentType(featureMode)
       if (
@@ -456,10 +1013,25 @@ export default function Home({
       setHasEditPermission(true)
       setSyncedRemoteContent({ code: defaultContent, nonce: Date.now() })
       lastPersistedContentRef.current = defaultContent
+      activeKeyRef.current = null
+      activeKeyStringRef.current = null
+      documentSaltRef.current = null
+      encryptedPayloadRef.current = null
+      setDecryptionError(null)
       resetWorker()
       setIsPageLoading(false)
     }
-  }, [urlSlug, featureMode, syncFromData, syncFromLocalRecord, resetWorker])
+  }, [
+    urlSlug,
+    featureMode,
+    decryptAndApplyData,
+    syncFromLocalRecord,
+    applyTabSnapshot,
+    restoreSessionUrl,
+    resetWorker,
+    checkOwnership,
+    paramView,
+  ])
 
   // Sync currentViewMode with URL parameter changes (for browser back/forward navigation)
   useEffect(() => {
@@ -486,25 +1058,6 @@ export default function Home({
     setIsCurrentUserOwner(true)
   }
 
-  const [documentPassword, setDocumentPassword] = useState('')
-  const [isAutoSaving, setIsAutoSaving] = useState<boolean>(false)
-  // Track if the record is indefinitely private (persisted as private)
-  const [isPrivacyLocked, setIsPrivacyLocked] = useState(
-    initialRecord?.isPrivate || false
-  )
-
-  const [isShareModalOpen, setIsShareModalOpen] = useState(false)
-
-  // Locked State for Private Links
-  const [isPasswordLocked, setIsPasswordLocked] = useState(
-    (initialRecord?.isPrivate && !initialRecord?.json) || false
-  )
-  const [isUnlocking, setIsUnlocking] = useState(false)
-  const [unlockErrorMessage, setUnlockErrorMessage] = useState<string | null>(
-    null
-  )
-  const [isPasswordVisible, setIsPasswordVisible] = useState(false)
-
   // Refs for stable callback access
   const slugRef = React.useRef(documentSlug)
   const isLockedRef = React.useRef(isPasswordLocked)
@@ -518,6 +1071,91 @@ export default function Home({
     isValidRef.current = isJsonValid
   }, [documentSlug, isPasswordLocked, isDocumentPrivate, isJsonValid])
 
+  const isPageLoadingRef = React.useRef(isPageLoading)
+  isPageLoadingRef.current = isPageLoading
+
+  const tabSnapshotRef = React.useRef<EditorTabSnapshot>({
+    type: documentType,
+    content: currentJsonContent,
+    slug: documentSlug,
+    viewMode: currentViewMode,
+    isDocumentPrivate,
+    userAccessLevel,
+    hasEditPermission,
+    isCurrentUserOwner,
+    isPrivacyLocked,
+    isPasswordLocked,
+    isLegacyDocument,
+    showMigrationBanner,
+    lastPersistedContent: lastPersistedContentRef.current,
+    documentPassword,
+    activeKey: activeKeyRef.current,
+    activeKeyString: activeKeyStringRef.current,
+    documentSalt: documentSaltRef.current,
+    encryptedPayload: encryptedPayloadRef.current,
+  })
+
+  tabSnapshotRef.current = {
+    type: documentType,
+    content: currentJsonContent,
+    slug: documentSlug,
+    viewMode: currentViewMode,
+    isDocumentPrivate,
+    userAccessLevel,
+    hasEditPermission,
+    isCurrentUserOwner,
+    isPrivacyLocked,
+    isPasswordLocked,
+    isLegacyDocument,
+    showMigrationBanner,
+    lastPersistedContent: lastPersistedContentRef.current,
+    documentPassword,
+    activeKey: activeKeyRef.current,
+    activeKeyString: activeKeyStringRef.current,
+    documentSalt: documentSaltRef.current,
+    encryptedPayload: encryptedPayloadRef.current,
+  }
+
+  useEffect(() => {
+    if (isPageLoading) return
+    setEditorTabSession(documentType, tabSnapshotRef.current)
+  }, [
+    currentJsonContent,
+    documentSlug,
+    documentType,
+    currentViewMode,
+    isDocumentPrivate,
+    userAccessLevel,
+    hasEditPermission,
+    isCurrentUserOwner,
+    isPrivacyLocked,
+    isPasswordLocked,
+    isLegacyDocument,
+    showMigrationBanner,
+    documentPassword,
+    isPageLoading,
+  ])
+
+  useEffect(() => {
+    return () => {
+      const snapshot = tabSnapshotRef.current
+      if (isPageLoadingRef.current && !snapshot.slug) return
+      setEditorTabSession(snapshot.type, snapshot)
+      if (!snapshot.slug || snapshot.isPasswordLocked) return
+
+      void saveLocalDocument({
+        slug: snapshot.slug,
+        type: snapshot.type,
+        mode: snapshot.type === 'json' ? snapshot.viewMode : 'formatter',
+        content: snapshot.content,
+        isPrivate: snapshot.isDocumentPrivate,
+        accessType: snapshot.userAccessLevel,
+      }).catch((error) => {
+        console.error('Failed to flush local document on tab switch', error)
+      })
+    }
+  }, [])
+
   const emitTimeout = React.useRef<NodeJS.Timeout | null>(null)
 
   // Stable Change Handler
@@ -528,22 +1166,28 @@ export default function Home({
     // Debounce socket emission to prevent flooding/lag
     if (emitTimeout.current) clearTimeout(emitTimeout.current)
 
-    emitTimeout.current = setTimeout(() => {
-      // Emit change if we have a slug and aren't locked (regardless of validity)
-      if (slugRef.current && !isLockedRef.current) {
+    emitTimeout.current = setTimeout(async () => {
+      // Emit encrypted change if we have a slug and aren't locked
+      if (slugRef.current && !isLockedRef.current && activeKeyRef.current) {
         const socket = getSocket()
         if (socket && socket.connected) {
-          socket.emit('code-change', { slug: slugRef.current, newCode: code })
+          try {
+            const encrypted = await encryptContent(code, activeKeyRef.current)
+            socket.emit('code-change', {
+              slug: slugRef.current,
+              newCode: JSON.stringify(encrypted),
+            })
+          } catch (e) {
+            console.error('Socket encryption failed', e)
+          }
         }
       }
     }, 100)
-  }, []) // ID IS STABLE NOW
+  }, [])
 
-  // Socket Effect - OPTIMIZED for Production
+  // Socket Effect - OPTIMIZED for Production with E2EE Relay
   useEffect(() => {
     if (!documentSlug) return
-
-    // Skip socket connection for locked private content (no collaboration possible)
     if (isDocumentPrivate && isPasswordLocked) return
 
     const socket = getSocket()
@@ -552,40 +1196,50 @@ export default function Home({
       socket.emit('join-room', documentSlug)
     }
 
-    const onCodeChange = (newCode: string) => {
-      // If we receive an update, we treat it as the source of truth
-      setCurrentJsonContent(newCode)
-      setSyncedRemoteContent({ code: newCode, nonce: Date.now() })
-      // CRITICAL: Mark as saved to prevent duplicate auto-save from this browser
-      lastPersistedContentRef.current = newCode
+    const onCodeChange = async (payloadStr: string) => {
+      if (!activeKeyRef.current) return
+      try {
+        let payload: { ciphertext: string; iv: string }
+        try {
+          payload = JSON.parse(payloadStr)
+        } catch {
+          return
+        }
+
+        if (payload.ciphertext && payload.iv) {
+          const newCode = await decryptContent(
+            payload.ciphertext,
+            payload.iv,
+            activeKeyRef.current
+          )
+          setCurrentJsonContent(newCode)
+          setSyncedRemoteContent({ code: newCode, nonce: Date.now() })
+          lastPersistedContentRef.current = newCode
+        }
+      } catch (e) {
+        console.error('Failed to decrypt incoming socket message', e)
+      }
     }
 
-    // CRITICAL FIX: Only connect if not already connected
-    // This prevents reconnection churn when slug changes
     if (!socket.connected) {
       socket.connect()
     } else {
-      // Already connected, just join the new room
       onConnect()
     }
 
     socket.on('connect', onConnect)
     socket.on('code-change', onCodeChange)
 
-    // Handle immediate connection case
     if (socket.connected) {
       onConnect()
     }
 
     return () => {
-      // CRITICAL FIX: Only remove OUR listeners, don't disconnect
-      // This prevents reconnection churn when component re-renders
       socket.off('connect', onConnect)
       socket.off('code-change', onCodeChange)
-      // Leave the room but stay connected for potential reuse
       socket.emit('leave-room', documentSlug)
     }
-  }, [documentSlug, isPasswordLocked]) // CRITICAL: Include isLocked so socket connects after unlock
+  }, [documentSlug, isPasswordLocked, isDocumentPrivate])
 
   // Alert State
   const [alertState, setAlertState] = useState<{
@@ -652,6 +1306,30 @@ export default function Home({
       console.error('Failed to delete local document', error)
     }
   }, [])
+
+  const handleRenameLocalDocument = useCallback(
+    async (slug: string, title: string) => {
+      try {
+        const updated = await updateLocalDocumentTitle(slug, title)
+        if (!updated) return null
+
+        setLocalDocuments((previous) => {
+          const remaining = previous.filter(
+            (item) => item.slug !== updated.slug
+          )
+          return [updated, ...remaining].sort(
+            (a, b) => b.updatedAt - a.updatedAt
+          )
+        })
+
+        return updated
+      } catch (error) {
+        console.error('Failed to rename local document', error)
+        return null
+      }
+    },
+    []
+  )
 
   const handleClearLocalDocuments = useCallback(async () => {
     try {
@@ -730,45 +1408,150 @@ export default function Home({
   ])
 
   const handleUnlockDocument = async () => {
-    if (!initialRecord?.slug) return
+    if (!documentPassword) return
     setIsUnlocking(true)
     setUnlockErrorMessage(null)
 
-    // Capture the password before the async call so it survives any re-renders
-    const password = documentPassword
+    const slug = documentSlug || initialRecord?.slug
 
-    try {
-      const res = await fetch(`/api/share/${initialRecord.slug}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        setUnlockErrorMessage(data.error || 'Failed to unlock')
-        return
-      }
+    if (isLegacyDocument) {
+      // Legacy unlock: check password against backend SHA-256 hash
+      try {
+        const res = await fetch(`/api/share/${slug}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: documentPassword }),
+        })
+        const data = await res.json()
+        if (!res.ok) {
+          setUnlockErrorMessage(data.error || 'Invalid password')
+          return
+        }
 
-      // Success — persist the password so auto-save can re-encrypt
-      setDocumentPassword(password)
-      syncFromData(data)
+        let content = ''
+        if (
+          data.type === 'json' &&
+          typeof data.data === 'object' &&
+          data.data !== null
+        ) {
+          content = JSON.stringify(data.data, null, 2)
+        } else {
+          content = data.data || data.json || ''
+        }
 
-      // Check if I am actually the owner (maybe I created it on this device?)
-      const ownedSlugs = Cookies.get('json-rock-owned')
-      if (ownedSlugs) {
-        try {
-          const parsed = JSON.parse(ownedSlugs)
-          if (Array.isArray(parsed) && parsed.includes(initialRecord.slug)) {
-            setIsCurrentUserOwner(true)
-            setHasEditPermission(true)
+        setCurrentJsonContent(content)
+        setSyncedRemoteContent({ code: content, nonce: Date.now() })
+        lastPersistedContentRef.current = content
+        setIsPasswordLocked(false)
+        setIsPrivacyLocked(true)
+        setUnlockErrorMessage(null)
+
+        if (slug) {
+          const ownedSlugs = Cookies.get('json-rock-owned')
+          if (ownedSlugs) {
+            try {
+              const parsed = JSON.parse(ownedSlugs)
+              if (Array.isArray(parsed) && parsed.includes(slug)) {
+                setIsCurrentUserOwner(true)
+                setHasEditPermission(true)
+              }
+            } catch (e) {}
           }
-        } catch (e) {}
+        }
+      } catch (err) {
+        console.error('Legacy unlock error:', err)
+        setUnlockErrorMessage('Failed to unlock document.')
+      } finally {
+        setIsUnlocking(false)
+      }
+      return
+    }
+
+    // E2EE (v2) Unlock: client-side PBKDF2 decryption
+    try {
+      const salt = documentSaltRef.current
+      const payload = encryptedPayloadRef.current
+      if (!salt || !payload?.ciphertext) {
+        throw new Error('No encrypted data or salt found to unlock')
       }
 
-      setIsPrivacyLocked(data.isPrivate)
+      const key = await deriveKeyFromPassword(documentPassword, salt)
+      const plaintext = await decryptContent(
+        payload.ciphertext,
+        payload.iv,
+        key
+      )
+
+      activeKeyRef.current = key
+      activeKeyStringRef.current = null
+      setCurrentJsonContent(plaintext)
+      setSyncedRemoteContent({ code: plaintext, nonce: Date.now() })
+      lastPersistedContentRef.current = plaintext
       setIsPasswordLocked(false)
+      setIsPrivacyLocked(true)
+      setUnlockErrorMessage(null)
+
+      if (slug) {
+        const ownedSlugs = Cookies.get('json-rock-owned')
+        if (ownedSlugs) {
+          try {
+            const parsed = JSON.parse(ownedSlugs)
+            if (Array.isArray(parsed) && parsed.includes(slug)) {
+              setIsCurrentUserOwner(true)
+              setHasEditPermission(true)
+            }
+          } catch (e) {}
+        }
+        if (clerkUserId && documentOwnerId && clerkUserId === documentOwnerId) {
+          setIsCurrentUserOwner(true)
+          setHasEditPermission(true)
+        }
+      }
+
+      // Backfill ownerKeyWrapped after password unlock (enables cross-device owner bypass)
+      if (isSignedIn && slug) {
+        try {
+          const wrapped = await buildOwnerKeyWrapped(key, getToken)
+          if (wrapped) {
+            let token: string | null = null
+            try {
+              token = await getToken()
+            } catch {
+              token = null
+            }
+            const headers: Record<string, string> = {
+              'Content-Type': 'application/json',
+            }
+            if (token) headers.Authorization = `Bearer ${token}`
+
+            const putRes = await fetch(`/api/share/${slug}`, {
+              method: 'PUT',
+              headers,
+              body: JSON.stringify({
+                schemaVersion: 2,
+                ciphertext: payload.ciphertext,
+                iv: payload.iv,
+                salt,
+                mode: currentViewMode,
+                isPrivate: true,
+                accessType: userAccessLevel,
+                type: documentType,
+                ownerKeyWrapped: wrapped,
+              }),
+            })
+            if (putRes.ok) {
+              setHasOwnerKeyWrapped(true)
+              const putData = await putRes.json()
+              if (putData.ownerId) setDocumentOwnerId(putData.ownerId)
+            }
+          }
+        } catch (wrapErr) {
+          console.warn('Failed to backfill ownerKeyWrapped', wrapErr)
+        }
+      }
     } catch (err) {
-      setUnlockErrorMessage((err as Error).message)
+      console.error('Unlock error:', err)
+      setUnlockErrorMessage('Incorrect password. Unable to decrypt.')
     } finally {
       setIsUnlocking(false)
     }
@@ -795,32 +1578,43 @@ export default function Home({
 
     setCurrentJsonContent(initialContent)
     setDocumentSlug(null)
+    setIsLegacyDocument(false)
+    setShowMigrationBanner(false)
     setIsDocumentPrivate(false)
+    setIsPreviewOnly(false)
     setIsPrivacyLocked(false)
-    setUserAccessLevel('viewer') // Default for new link settings
-    setHasEditPermission(true) // New file is always editable
+    setUserAccessLevel('viewer')
+    setHasEditPermission(true)
     setDocumentPassword('')
+    setDecryptionError(null)
     setSyncedRemoteContent({
       code: initialContent,
       nonce: Date.now(),
     })
 
-    // Set view mode to formatter for JSON documents
     if (!isText && !isMarkdown && !isHtml) {
       setCurrentViewMode('formatter')
     }
 
-    // Create initial record
     setIsAutoSaving(true)
     try {
+      const { key, keyString } = await generateDocumentKey()
+      activeKeyRef.current = key
+      activeKeyStringRef.current = keyString
+      const { ciphertext, iv } = await encryptContent(initialContent, key)
+      encryptedPayloadRef.current = { ciphertext, iv }
+
       const res = await fetch('/api/share', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          json: initialContent,
+          schemaVersion: 2,
+          ciphertext,
+          iv,
           mode: isText || isMarkdown || isHtml ? currentViewMode : 'formatter',
           type: targetType,
           accessType: 'editor',
+          isPrivate: false,
         }),
       })
       const data = await res.json()
@@ -831,6 +1625,7 @@ export default function Home({
         setIsCurrentUserOwner(true)
         setDocumentType(data.type || targetType)
         addOwnership(data.slug)
+        lastPersistedContentRef.current = initialContent
 
         const resolvedType = (data.type || targetType) as ShareType
         const route = `${getEditorBasePath(resolvedType)}/`
@@ -840,9 +1635,8 @@ export default function Home({
           resolvedType === 'html'
             ? ''
             : '?view=formatter'
-        const newUrl = `${route}${data.slug}${viewParam}`
+        const newUrl = `${route}${data.slug}${viewParam}#key=${keyString}`
 
-        // Use pushState to update URL without refresh
         window.history.pushState(
           { ...window.history.state, as: newUrl, url: newUrl },
           '',
@@ -859,29 +1653,76 @@ export default function Home({
   // Save Button Handler
   const handleSaveDocument = async (silent = false) => {
     if (!documentSlug) return
-
-    if (isDocumentPrivate && documentPassword.length < 4) {
-      if (!silent)
-        triggerAlert(
-          'Invalid Password',
-          'Password must be at least 4 characters for private links.',
-          'error'
-        )
-      return
-    }
+    if (isPasswordLocked) return
 
     setIsAutoSaving(true)
     try {
+      const wasLegacy = isLegacyDocument
+      let key = activeKeyRef.current
+      let salt = documentSaltRef.current
+      let keyString: string | undefined = undefined
+
+      if (isDocumentPrivate) {
+        if (documentPassword.length < 4 && !key) {
+          if (!silent)
+            triggerAlert(
+              'Invalid Password',
+              'Password must be at least 4 characters for private links.',
+              'error'
+            )
+          setIsAutoSaving(false)
+          return
+        }
+        if (!salt || wasLegacy) {
+          salt = generateSalt()
+          documentSaltRef.current = salt
+        }
+        if (!key && documentPassword) {
+          key = await deriveKeyFromPassword(documentPassword, salt)
+          activeKeyRef.current = key
+        }
+      } else {
+        if (!key) {
+          const generated = await getOrCreateDocumentKey()
+          key = generated.key
+          keyString = generated.keyString
+        }
+      }
+
+      if (!key) throw new Error('No encryption key available for saving')
+
+      const { ciphertext, iv } = await encryptContent(currentJsonContent, key)
+      encryptedPayloadRef.current = { ciphertext, iv }
+
+      let ownerKeyWrapped: string | null = null
+      if (isDocumentPrivate) {
+        ownerKeyWrapped = await buildOwnerKeyWrapped(key, getToken)
+      }
+
+      let token: string | null = null
+      try {
+        token = await getToken()
+      } catch {
+        token = null
+      }
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      }
+      if (token) headers.Authorization = `Bearer ${token}`
+
       const res = await fetch(`/api/share/${documentSlug}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
-          json: currentJsonContent,
+          schemaVersion: 2,
+          ciphertext,
+          iv,
+          salt: isDocumentPrivate ? salt || undefined : undefined,
           mode: currentViewMode,
           isPrivate: isDocumentPrivate,
-          accessType: userAccessLevel, // Preserve current access settings
-          password: isDocumentPrivate ? documentPassword : undefined,
+          accessType: userAccessLevel,
           type: documentType,
+          ...(ownerKeyWrapped ? { ownerKeyWrapped } : {}),
         }),
       })
 
@@ -891,13 +1732,47 @@ export default function Home({
           addOwnership(documentSlug)
         }
         if (isDocumentPrivate) setIsPrivacyLocked(true)
-        lastPersistedContentRef.current = currentJsonContent // Update last saved reference
-        if (!silent)
+        if (ownerKeyWrapped) setHasOwnerKeyWrapped(true)
+        if (data.ownerId) setDocumentOwnerId(data.ownerId)
+        lastPersistedContentRef.current = currentJsonContent
+
+        // If this document was legacy, it is now migrated!
+        if (wasLegacy) {
+          setIsLegacyDocument(false)
+          setShowMigrationBanner(false)
+
+          // Update URL in-place to include #key=... for public links
+          if (!isDocumentPrivate) {
+            const resolvedType = documentType
+            const route = `${getEditorBasePath(resolvedType)}/`
+            const viewParam =
+              resolvedType === 'text' ||
+              resolvedType === 'markdown' ||
+              resolvedType === 'html'
+                ? ''
+                : `?view=${currentViewMode}`
+            const currentKey = keyString || activeKeyStringRef.current || ''
+            const newUrl = `${route}${documentSlug}${viewParam}#key=${currentKey}`
+
+            window.history.replaceState(
+              { ...window.history.state, as: newUrl, url: newUrl },
+              '',
+              newUrl
+            )
+          }
+
+          setToastState({
+            isOpen: true,
+            message:
+              'Document upgraded to End-to-End Encryption! Share the updated link with collaborators.',
+          })
+        } else if (!silent) {
           triggerAlert(
             'Saved Successfully',
-            'Your changes have been saved.',
+            'Your encrypted changes have been saved.',
             'success'
           )
+        }
       } else {
         const err = data
         if (!silent)
@@ -912,7 +1787,7 @@ export default function Home({
       if (!silent)
         triggerAlert(
           'Save Failed',
-          'Network error or server unreachable.',
+          (e as Error).message || 'Network error or server unreachable.',
           'error'
         )
     } finally {
@@ -924,11 +1799,17 @@ export default function Home({
   const [editorPanelWidthPercentage, setEditorPanelWidthPercentage] =
     useState(40) // Default 40%
   const [isResizingPanel, setIsResizingPanel] = useState(false)
+  /** Collapse the left JSON input pane; right preview stays visible. */
+  const [isLeftEditorCollapsed, setIsLeftEditorCollapsed] = useState(false)
 
-  const startResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
-    mouseDownEvent.preventDefault()
-    setIsResizingPanel(true)
-  }, [])
+  const startResizing = useCallback(
+    (mouseDownEvent: React.MouseEvent) => {
+      mouseDownEvent.preventDefault()
+      if (isLeftEditorCollapsed) return
+      setIsResizingPanel(true)
+    },
+    [isLeftEditorCollapsed]
+  )
 
   const stopResizing = useCallback(() => {
     setIsResizingPanel(false)
@@ -936,7 +1817,7 @@ export default function Home({
 
   const resize = useCallback(
     (mouseMoveEvent: MouseEvent) => {
-      if (isResizingPanel) {
+      if (isResizingPanel && !isLeftEditorCollapsed) {
         const newWidth = (mouseMoveEvent.clientX / window.innerWidth) * 100
         // Constraint between 20% and 80%
         if (newWidth > 20 && newWidth < 80) {
@@ -944,7 +1825,7 @@ export default function Home({
         }
       }
     },
-    [isResizingPanel]
+    [isResizingPanel, isLeftEditorCollapsed]
   )
 
   useEffect(() => {
@@ -982,7 +1863,7 @@ export default function Home({
           'Please select a valid .md file.',
           'error'
         )
-        if (fileInputRef.current) fileInputRef.current.value = '' // Reset input
+        if (fileInputRef.current) fileInputRef.current.value = ''
         setIsUploadModalOpen(false)
         return
       }
@@ -993,19 +1874,18 @@ export default function Home({
           'Please select a valid .json file.',
           'error'
         )
-        if (fileInputRef.current) fileInputRef.current.value = '' // Reset input
+        if (fileInputRef.current) fileInputRef.current.value = ''
         setIsUploadModalOpen(false)
         return
       }
     } else {
-      // General validation for text or other modes
       if (!isJson && !isMarkdown && !isText) {
         triggerAlert(
           'Upload Failed',
           'Please select a valid .json, .md, or .txt file.',
           'error'
         )
-        if (fileInputRef.current) fileInputRef.current.value = '' // Reset input
+        if (fileInputRef.current) fileInputRef.current.value = ''
         setIsUploadModalOpen(false)
         return
       }
@@ -1013,23 +1893,33 @@ export default function Home({
 
     if (file.size > 2 * 1024 * 1024) {
       triggerAlert('Upload Failed', 'File size exceeds the 2MB limit.', 'error')
-      if (fileInputRef.current) fileInputRef.current.value = '' // Reset input
+      if (fileInputRef.current) fileInputRef.current.value = ''
       setIsUploadModalOpen(false)
       return
     }
 
     setIsFileUploading(true)
-
-    // Read the file content locally before uploading (so we can display it without backend returning it)
     const fileContent = await file.text()
 
-    const formData = new FormData()
-    formData.append('file', file)
-
     try {
-      const res = await fetch('/api/upload', {
+      const targetType = isJson ? 'json' : isMarkdown ? 'markdown' : 'text'
+      const { key, keyString } = await generateDocumentKey()
+      activeKeyRef.current = key
+      activeKeyStringRef.current = keyString
+      const { ciphertext, iv } = await encryptContent(fileContent, key)
+      encryptedPayloadRef.current = { ciphertext, iv }
+
+      const res = await fetch('/api/share', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ciphertext,
+          iv,
+          mode: isJson ? 'formatter' : 'visualize',
+          type: targetType,
+          accessType: 'editor',
+          isPrivate: false,
+        }),
       })
 
       const data = await res.json()
@@ -1037,8 +1927,6 @@ export default function Home({
         throw new Error(data.error || 'Upload failed')
       }
 
-      // Success - Update state locally and change URL in-place
-      const targetType = isJson ? 'json' : isMarkdown ? 'markdown' : 'text'
       if (isJson) setCurrentViewMode('formatter')
       setDocumentType(targetType)
       setDocumentSlug(data.slug)
@@ -1051,7 +1939,7 @@ export default function Home({
             ? '/editor/markdown/'
             : '/editor/text/'
       const viewQuery = isJson ? '?view=formatter' : ''
-      const newUrl = `${routePrefix}${data.slug}${viewQuery}`
+      const newUrl = `${routePrefix}${data.slug}${viewQuery}#key=${keyString}`
 
       window.history.pushState(
         { ...window.history.state, as: newUrl, url: newUrl },
@@ -1059,7 +1947,6 @@ export default function Home({
         newUrl
       )
 
-      // Update the editor with the locally-read file content (no backend change needed)
       setCurrentJsonContent(fileContent)
       setSyncedRemoteContent({ code: fileContent, nonce: Date.now() })
       lastPersistedContentRef.current = fileContent
@@ -1082,7 +1969,6 @@ export default function Home({
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
-    // Only allow drag for markdown
     if (documentType === 'markdown') {
       setIsDragOver(true)
     }
@@ -1099,7 +1985,6 @@ export default function Home({
     e.stopPropagation()
     setIsDragOver(false)
 
-    // Only allow drop for markdown
     if (documentType !== 'markdown') return
 
     const file = e.dataTransfer.files?.[0]
@@ -1107,97 +1992,366 @@ export default function Home({
     await processSelectedFile(file)
   }
 
-  const handleShareDocument = async (settings: {
-    accessLevel: ShareAccessType
-    isPrivateLink: boolean
-    sharePassword?: string
-  }) => {
-    // Validate
-    if (
-      settings.isPrivateLink &&
-      (!settings.sharePassword || settings.sharePassword.length < 4)
-    ) {
-      triggerAlert(
-        'Invalid Password',
-        'Password must be at least 4 characters.',
-        'error'
-      )
-      return
-    }
+  const executeShareDocument = useCallback(
+    async (
+      settings: {
+        accessLevel: ShareAccessType
+        isPrivateLink: boolean
+        sharePassword?: string
+        previewOnly?: boolean
+      },
+      options?: { copyToClipboard?: boolean }
+    ): Promise<string> => {
+      setIsAutoSaving(true)
+      const method = documentSlug ? 'PUT' : 'POST'
+      const url = documentSlug ? `/api/share/${documentSlug}` : '/api/share'
+      const copyToClipboard = options?.copyToClipboard !== false
 
-    setIsAutoSaving(true)
-    // If no slug, create new
-    const method = documentSlug ? 'PUT' : 'POST'
-    const url = documentSlug ? `/api/share/${documentSlug}` : '/api/share'
+      try {
+        let token: string | null = null
+        try {
+          token = await getToken()
+        } catch (e) {
+          console.warn('Failed to retrieve Clerk auth token', e)
+        }
 
-    try {
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          json: currentJsonContent,
-          mode: currentViewMode,
-          isPrivate: settings.isPrivateLink,
-          accessType: settings.accessLevel,
-          password: settings.sharePassword,
-          type: documentType,
-        }),
-      })
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        }
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`
+        }
 
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(data.error || 'Share failed')
-      }
+        let key: CryptoKey
+        let salt: string | undefined = undefined
+        let keyString: string | undefined = undefined
 
-      // Success
-      const newSlug = data.slug || documentSlug
-      if (newSlug !== documentSlug) {
-        setDocumentSlug(newSlug)
-        addOwnership(newSlug) // Mark as owner of new/updated slug
+        if (settings.isPrivateLink) {
+          salt = generateSalt()
+          documentSaltRef.current = salt
+          key = await deriveKeyFromPassword(settings.sharePassword!, salt)
+          activeKeyRef.current = key
+          activeKeyStringRef.current = null
+        } else {
+          const generated = await getOrCreateDocumentKey()
+          key = generated.key
+          keyString = generated.keyString
+        }
+
+        const { ciphertext, iv } = await encryptContent(currentJsonContent, key)
+        encryptedPayloadRef.current = { ciphertext, iv }
+
+        let ownerKeyWrapped: string | null = null
+        if (settings.isPrivateLink) {
+          ownerKeyWrapped = await buildOwnerKeyWrapped(key, getToken)
+        }
+
+        const res = await fetch(url, {
+          method,
+          headers,
+          body: JSON.stringify({
+            schemaVersion: 2,
+            ciphertext,
+            iv,
+            salt: settings.isPrivateLink ? salt : undefined,
+            mode: currentViewMode,
+            isPrivate: settings.isPrivateLink,
+            accessType: settings.accessLevel,
+            previewOnly:
+              documentType === 'markdown'
+                ? settings.previewOnly === true
+                : false,
+            type: documentType,
+            ...(ownerKeyWrapped ? { ownerKeyWrapped } : {}),
+          }),
+        })
+
+        const data = await res.json()
+        if (!res.ok) {
+          throw new Error(data.error || 'Share failed')
+        }
+
+        setIsLegacyDocument(false)
+        setShowMigrationBanner(false)
+
+        const newSlug = data.slug || documentSlug
+        if (newSlug) {
+          setDocumentSlug(newSlug)
+          addOwnership(newSlug)
+
+          const route = `${getEditorBasePath(documentType)}/`
+          const viewParam =
+            documentType === 'text' ||
+            documentType === 'markdown' ||
+            documentType === 'html'
+              ? ''
+              : `?view=${currentViewMode}`
+          const fragment = settings.isPrivateLink
+            ? ''
+            : `#key=${keyString || activeKeyStringRef.current || ''}`
+          const newUrl = `${route}${newSlug}${viewParam}${fragment}`
+
+          window.history.pushState(
+            { ...window.history.state, as: newUrl, url: newUrl },
+            '',
+            newUrl
+          )
+        }
+
+        setUserAccessLevel(settings.accessLevel)
+        setIsDocumentPrivate(settings.isPrivateLink)
+        setIsPreviewOnly(
+          documentType === 'markdown' ? settings.previewOnly === true : false
+        )
+        if (settings.isPrivateLink) setIsPrivacyLocked(true)
+        if (settings.sharePassword) setDocumentPassword(settings.sharePassword)
+        if (ownerKeyWrapped) setHasOwnerKeyWrapped(true)
+        if (data.ownerId) setDocumentOwnerId(data.ownerId)
 
         const route = `${getEditorBasePath(documentType)}/`
-        const viewParam =
-          documentType === 'text' ||
-          documentType === 'markdown' ||
-          documentType === 'html'
-            ? ''
-            : `?view=${currentViewMode}`
-        const newUrl = `${route}${newSlug}${viewParam}`
+        const fragment = settings.isPrivateLink
+          ? ''
+          : `#key=${keyString || activeKeyStringRef.current || ''}`
+        const link = `${window.location.origin}${route}${newSlug}${fragment}`
 
-        // Update URL in-place
-        window.history.pushState(
-          { ...window.history.state, as: newUrl, url: newUrl },
-          '',
-          newUrl
-        )
+        let message = copyToClipboard
+          ? 'Settings saved and encrypted link copied to clipboard!'
+          : 'Share settings saved.'
+        if (copyToClipboard) {
+          try {
+            await navigator.clipboard.writeText(link)
+          } catch (err) {
+            console.warn('Clipboard write failed', err)
+            message = 'Settings saved. Copy your link below!'
+          }
+        }
+
+        setIsShareModalOpen(true)
+        setToastState({ isOpen: true, message })
+        return link
+      } catch (e) {
+        console.error(e)
+        triggerAlert('Share Failed', (e as Error).message, 'error')
+        throw e
+      } finally {
+        setIsAutoSaving(false)
+      }
+    },
+    [
+      documentSlug,
+      documentType,
+      currentViewMode,
+      currentJsonContent,
+      getToken,
+      getOrCreateDocumentKey,
+      addOwnership,
+    ]
+  )
+
+  const openAuthModal = useCallback(
+    (options?: {
+      pendingSettings?: {
+        accessLevel: ShareAccessType
+        isPrivateLink: boolean
+        sharePassword?: string
+        previewOnly?: boolean
+      }
+      pendingOpenModal?: boolean
+    }) => {
+      const currentUrl =
+        typeof window !== 'undefined' ? window.location.href : '/editor'
+
+      if (options?.pendingSettings) {
+        pendingShareSettingsRef.current = options.pendingSettings
+        if (typeof window !== 'undefined') {
+          try {
+            sessionStorage.setItem(
+              'jsonrock_pending_share_settings',
+              JSON.stringify(options.pendingSettings)
+            )
+          } catch (e) {
+            console.warn('SessionStorage write failed', e)
+          }
+        }
       }
 
-      // Update local state
-      setUserAccessLevel(settings.accessLevel)
-      setIsDocumentPrivate(settings.isPrivateLink)
-      if (settings.isPrivateLink) setIsPrivacyLocked(true)
-      if (settings.sharePassword) setDocumentPassword(settings.sharePassword)
+      if (options?.pendingOpenModal) {
+        pendingOpenShareModalRef.current = true
+        if (typeof window !== 'undefined') {
+          try {
+            sessionStorage.setItem('jsonrock_pending_open_share_modal', 'true')
+          } catch (e) {
+            console.warn('SessionStorage write failed', e)
+          }
+        }
+      }
 
-      // Copy Link
-      const route = `${getEditorBasePath(documentType)}/`
-      const link = `${window.location.origin}${route}${newSlug}`
-      let message = 'Settings saved and link copied to clipboard!'
       try {
-        await navigator.clipboard.writeText(link)
-      } catch (err) {
-        console.warn('Clipboard write failed', err)
-        message = 'Settings saved. You can copy the link from the address bar.'
+        openSignIn({
+          fallbackRedirectUrl: currentUrl,
+          signUpFallbackRedirectUrl: currentUrl,
+          forceRedirectUrl: currentUrl,
+          signUpForceRedirectUrl: currentUrl,
+        })
+      } catch (e) {
+        console.warn('Clerk openSignIn modal failed:', e)
+      }
+    },
+    [openSignIn]
+  )
+
+  const handleShareDocument = useCallback(
+    async (
+      settings: {
+        accessLevel: ShareAccessType
+        isPrivateLink: boolean
+        sharePassword?: string
+        previewOnly?: boolean
+      },
+      options?: { copyToClipboard?: boolean }
+    ): Promise<string> => {
+      if (
+        settings.isPrivateLink &&
+        (!settings.sharePassword || settings.sharePassword.length < 4)
+      ) {
+        triggerAlert(
+          'Invalid Password',
+          'Password must be at least 4 characters.',
+          'error'
+        )
+        throw new Error('Invalid password')
       }
 
-      setIsShareModalOpen(false)
-      setToastState({ isOpen: true, message })
-    } catch (e) {
-      console.error(e)
-      triggerAlert('Share Failed', (e as Error).message, 'error')
-    } finally {
-      setIsAutoSaving(false)
+      // If user is not authenticated, preserve share settings and trigger Clerk sign-in modal
+      if (!isSignedIn) {
+        openAuthModal({ pendingSettings: settings })
+        throw new Error('Authentication required')
+      }
+
+      pendingShareSettingsRef.current = null
+      if (typeof window !== 'undefined') {
+        try {
+          sessionStorage.removeItem('jsonrock_pending_share_settings')
+          sessionStorage.removeItem('jsonrock_pending_open_share_modal')
+        } catch (e) {
+          console.warn('SessionStorage remove failed', e)
+        }
+      }
+      return executeShareDocument(settings, options)
+    },
+    [isSignedIn, openAuthModal, executeShareDocument]
+  )
+
+  const handleSendShareEmail = useCallback(
+    async (payload: {
+      recipientEmail: string
+      shareUrl: string
+      documentTitle: string
+    }) => {
+      let token: string | null = null
+      try {
+        token = await getToken()
+      } catch (e) {
+        console.warn('Failed to retrieve Clerk auth token', e)
+      }
+      if (!token) {
+        throw new Error('Authentication required to send email.')
+      }
+
+      const res = await fetch('/api/share/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to send email')
+      }
+      return data as { message?: string }
+    },
+    [getToken]
+  )
+
+  const handleOpenShareModal = useCallback(
+    (open: boolean) => {
+      if (open && !isSignedIn) {
+        openAuthModal({ pendingOpenModal: true })
+        return
+      }
+      setIsShareModalOpen(open)
+    },
+    [isSignedIn, openAuthModal]
+  )
+
+  // Automatically resume the share operation or open modal once sign-in/sign-up completes
+  useEffect(() => {
+    if (isSignedIn) {
+      let pendingSettings = pendingShareSettingsRef.current
+      let pendingOpenModal = pendingOpenShareModalRef.current
+
+      // Retrieve from sessionStorage if state was lost during OAuth or sign-up redirect
+      if (typeof window !== 'undefined') {
+        try {
+          if (!pendingSettings) {
+            const stored = sessionStorage.getItem(
+              'jsonrock_pending_share_settings'
+            )
+            if (stored) {
+              pendingSettings = JSON.parse(stored)
+            }
+          }
+        } catch (e) {
+          console.warn(
+            'Failed to parse pending share settings from sessionStorage',
+            e
+          )
+        }
+
+        try {
+          if (!pendingOpenModal) {
+            const storedModal = sessionStorage.getItem(
+              'jsonrock_pending_open_share_modal'
+            )
+            if (storedModal === 'true') {
+              pendingOpenModal = true
+            }
+          }
+        } catch (e) {
+          console.warn(
+            'Failed to parse pending open share modal from sessionStorage',
+            e
+          )
+        }
+      }
+
+      if (pendingSettings) {
+        pendingShareSettingsRef.current = null
+        if (typeof window !== 'undefined') {
+          try {
+            sessionStorage.removeItem('jsonrock_pending_share_settings')
+            sessionStorage.removeItem('jsonrock_pending_open_share_modal')
+          } catch (e) {
+            console.warn('SessionStorage cleanup failed', e)
+          }
+        }
+        executeShareDocument(pendingSettings)
+      } else if (pendingOpenModal) {
+        pendingOpenShareModalRef.current = false
+        if (typeof window !== 'undefined') {
+          try {
+            sessionStorage.removeItem('jsonrock_pending_open_share_modal')
+            sessionStorage.removeItem('jsonrock_pending_share_settings')
+          } catch (e) {
+            console.warn('SessionStorage cleanup failed', e)
+          }
+        }
+        setIsShareModalOpen(true)
+      }
     }
-  }
+  }, [isSignedIn, executeShareDocument])
 
   // Debounce the input to avoid thrashing the worker
   const debouncedJsonContent = useDebounce(currentJsonContent, 500)
@@ -1226,14 +2380,11 @@ export default function Home({
       return
     }
 
-    // Try a standard JSON.parse just to check validity and catch syntax errors fast,
-    // but don't store the result! Only the worker stores the tree.
     try {
       const parsed = JSON.parse(debouncedJsonContent)
       setParsedJsonData(parsed)
       setIsJsonValid(true)
       setJsonValidationError(null)
-      // Send to worker for heavy processing
       processJson(debouncedJsonContent)
     } catch (e) {
       setIsJsonValid(false)
@@ -1257,7 +2408,6 @@ export default function Home({
         layoutOptions,
       } = workerState.result
 
-      // Tree view data is ready immediately (virtualized, flat list)
       setTreeNodes(newTreeNodes)
 
       if (rfNodes.length > 1000) {
@@ -1267,7 +2417,6 @@ export default function Home({
         setIsLayoutCalculating(false)
       } else {
         setIsGraphTooLarge(false)
-        // Graph view needs ELK layout run on the un-positioned nodes
         if (currentViewMode === 'visualize') {
           setIsLayoutCalculating(true)
           applyElkLayout(
@@ -1282,10 +2431,6 @@ export default function Home({
             setIsLayoutCalculating(false)
           })
         } else {
-          // If we're not in graph mode, we don't strictly need to run ELK,
-          // but we can save the unpositioned nodes just in case they switch back.
-          // Running it lazy on switch requires keeping the worker result in state,
-          // so for now we'll just let the switch re-trigger the worker if needed.
           setGraphNodes([])
           setGraphEdges([])
         }
@@ -1294,10 +2439,8 @@ export default function Home({
   }, [workerState, currentViewMode])
 
   const handleEditorValidation = useCallback((markers: any[]) => {
-    // Monaco MarkerSeverity: 8 = Error, 4 = Warning
     const issues = markers.filter((m) => m.severity >= 4)
     if (issues.length > 0) {
-      // Sort so errors (8) come before warnings (4)
       const highestIssue = issues.sort((a, b) => b.severity - a.severity)[0]
       setMonacoValidationError({
         message: highestIssue.message,
@@ -1314,7 +2457,6 @@ export default function Home({
 
   // Auto-Save Effect
   useEffect(() => {
-    // Auto-save in Text or JSON Mode, if editable, and has slug
     if (
       (documentType === 'text' ||
         documentType === 'json' ||
@@ -1325,11 +2467,9 @@ export default function Home({
       !isPasswordLocked &&
       (documentType !== 'json' || isJsonValid)
     ) {
-      // Check if content actually changed from last save
       if (debouncedContentForAutoSave === lastPersistedContentRef.current)
         return
 
-      // Prevent double calls or saving while already saving (though guard handles it)
       handleSaveDocument(true)
     }
   }, [
@@ -1341,10 +2481,9 @@ export default function Home({
     isJsonValid,
   ])
 
-  // Auto-Create Effect: When no slug exists and user edits default content, auto-create a document
+  // Auto-Create Effect: When no slug exists and user edits default content, auto-create an encrypted document
   const isAutoCreatingRef = React.useRef(false)
   useEffect(() => {
-    // Only trigger if: no slug, content differs from default, not empty, not already creating
     if (
       !documentSlug &&
       debouncedContentForAutoSave !== lastPersistedContentRef.current &&
@@ -1354,19 +2493,29 @@ export default function Home({
     ) {
       isAutoCreatingRef.current = true
       const targetType = documentType
-      const isText = targetType === 'text'
-      fetch('/api/share', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          json: debouncedContentForAutoSave,
-          mode: currentViewMode, // Save the actual current view mode, not forced "formatter"
-          type: targetType,
-          accessType: 'editor',
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
+
+      ;(async () => {
+        try {
+          const { key, keyString } = await getOrCreateDocumentKey()
+          const { ciphertext, iv } = await encryptContent(
+            debouncedContentForAutoSave,
+            key
+          )
+          encryptedPayloadRef.current = { ciphertext, iv }
+
+          const res = await fetch('/api/share', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ciphertext,
+              iv,
+              mode: currentViewMode,
+              type: targetType,
+              accessType: 'editor',
+              isPrivate: false,
+            }),
+          })
+          const data = await res.json()
           if (data.slug) {
             setDocumentSlug(data.slug)
             setUserAccessLevel(data.accessType || 'editor')
@@ -1376,7 +2525,7 @@ export default function Home({
             addOwnership(data.slug)
             lastPersistedContentRef.current = debouncedContentForAutoSave
 
-            const resolvedType = (data.type || documentType) as ShareType
+            const resolvedType = (data.type || targetType) as ShareType
             const route = `${getEditorBasePath(resolvedType)}/`
             const viewParam =
               resolvedType === 'text' ||
@@ -1384,24 +2533,41 @@ export default function Home({
               resolvedType === 'html'
                 ? ''
                 : `?view=${currentViewMode}`
-            const newUrl = `${route}${data.slug}${viewParam}`
+            const newUrl = `${route}${data.slug}${viewParam}#key=${keyString}`
 
-            // Use window.history.replaceState instead of router.replace
-            // router.replace causes a Next.js server-side navigation which may 404 because the DB isn't updated instantly causing a redirect to /editor
             justAutoSavedSlugRef.current = data.slug
             window.history.replaceState(
               { ...window.history.state, as: newUrl, url: newUrl },
               '',
               newUrl
             )
+
+            patchEditorTabSession(resolvedType, {
+              slug: data.slug,
+              lastPersistedContent: debouncedContentForAutoSave,
+              activeKey: activeKeyRef.current,
+              activeKeyString: keyString ?? null,
+              encryptedPayload: { ciphertext, iv },
+              userAccessLevel: data.accessType || 'editor',
+              hasEditPermission: true,
+              isCurrentUserOwner: true,
+            })
           }
-        })
-        .catch((e) => console.error('Auto-create failed', e))
-        .finally(() => {
+        } catch (e) {
+          console.error('Auto-create failed', e)
+        } finally {
           isAutoCreatingRef.current = false
-        })
+        }
+      })()
     }
-  }, [debouncedContentForAutoSave, documentSlug, documentType, isJsonValid])
+  }, [
+    debouncedContentForAutoSave,
+    documentSlug,
+    documentType,
+    isJsonValid,
+    currentViewMode,
+    getOrCreateDocumentKey,
+  ])
 
   const handleCopy = () => {
     // Copy the formatted output, not the input, if we are in format tab
@@ -1448,19 +2614,23 @@ export default function Home({
     }
   }, [currentJsonContent, indentationSize, documentType, isJsonValid])
 
+  const formatterRemoteValue = React.useMemo(
+    () => ({ code: formattedOutput, nonce: 1 }),
+    [formattedOutput]
+  )
+
   // Mobile specific view state
   const [mobileTab, setMobileTab] = useState<'editor' | 'viewer'>('editor')
 
   return (
     <div
       className={cn(
-        'flex h-[100dvh] w-screen bg-gray-50 text-zinc-800 font-sans overflow-hidden',
-        documentType !== 'text' &&
-          'dark:bg-zinc-950 dark:text-zinc-300 relative'
+        'flex h-dvh w-screen bg-gray-50 text-zinc-800 font-sans overflow-hidden',
+        'dark:bg-zinc-950 dark:text-zinc-300 relative'
       )}
     >
-      {isPageLoading && !isPasswordLocked && (
-        <div className='absolute inset-0 z-[100] flex items-center justify-center pointer-events-none'>
+      {(isPageLoading || isOwnerUnlockPending) && !isPasswordLocked && (
+        <div className='absolute inset-0 z-100 flex items-center justify-center pointer-events-none'>
           <JsonRockLoader className='w-14 h-14' />
         </div>
       )}
@@ -1475,165 +2645,194 @@ export default function Home({
           onOpenUploadModal={setIsUploadModalOpen}
           onCreateNewDocument={handleCreateNewDocument}
           isAutoSaving={isAutoSaving}
-          onOpenShareModal={setIsShareModalOpen}
+          onOpenShareModal={handleOpenShareModal}
           onOpenHistoryModal={openHistoryModal}
           currentViewMode={currentViewMode}
+          previewOnlyView={isMarkdownPreviewOnlyShare}
         />
+
+        {/* Legacy Document Migration Notice Banner */}
+        {showMigrationBanner && (
+          <div className='bg-amber-500/10 border-b border-amber-500/20 px-4 py-2 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between gap-3 shrink-0 z-20'>
+            <div className='flex items-center gap-2 min-w-0'>
+              <AlertTriangle
+                size={15}
+                className='shrink-0 text-amber-600 dark:text-amber-400'
+              />
+              <span className='truncate sm:whitespace-normal'>
+                <strong>Upgrade Notice:</strong> This document is stored in
+                legacy plaintext. When you edit and save changes, it will be
+                automatically upgraded to End-to-End Encryption. Anyone with the
+                current link will need the new link (generated upon saving) to
+                view this content.
+              </span>
+            </div>
+            <button
+              onClick={() => setShowMigrationBanner(false)}
+              className='p-1 hover:bg-amber-500/20 rounded transition-colors text-amber-800 dark:text-amber-300 shrink-0'
+              title='Dismiss notice'
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* Split View */}
         <main className='flex-1 flex flex-col lg:flex-row overflow-hidden relative'>
-          {/* Editor Pane (Left/Top) */}
-          <div
-            style={
-              {
-                '--left-panel-width': `${editorPanelWidthPercentage}%`,
-              } as React.CSSProperties
-            }
-            className={cn(
-              'border-b lg:border-b-0 lg:border-r border-zinc-200 flex flex-col bg-white h-full min-h-0',
-              documentType === 'json' &&
+          {/* Editor Pane (Left/Top) — unmount when collapsed (display:none crashes Monaco) */}
+          {!(documentType === 'json' && isLeftEditorCollapsed) && (
+            <div
+              style={
+                {
+                  '--left-panel-width': `${editorPanelWidthPercentage}%`,
+                } as React.CSSProperties
+              }
+              className={cn(
+                'border-b lg:border-b-0 lg:border-r border-zinc-200 flex flex-col bg-white h-full min-h-0',
                 'dark:border-zinc-900 dark:bg-[#09090b]',
-              documentType !== 'json'
-                ? 'w-full'
-                : 'w-full lg:w-[var(--left-panel-width)] lg:min-w-[300px]',
-              // Mobile visibility toggle
-              // Mobile visibility toggle
-              mobileTab === 'editor' ? 'flex' : 'hidden lg:flex'
-            )}
-          >
-            {documentType === 'text' ? (
-              <div className='flex-1 h-full relative'>
-                <RichTextEditor
-                  content={currentJsonContent}
-                  onChange={onJsonContentChange}
-                  readOnly={!hasEditPermission}
-                  remoteContent={syncedRemoteContent?.code}
-                  forceLightMode={true}
-                  isCurrentUserOwner={isCurrentUserOwner}
-                  slug={documentSlug}
-                />
-              </div>
-            ) : documentType === 'markdown' ? (
-              <div className='flex-1 h-full relative'>
-                <MarkdownEditor
-                  content={currentJsonContent}
-                  onChange={onJsonContentChange}
-                  readOnly={!hasEditPermission}
-                  onFileDrop={processSelectedFile}
-                  slug={documentSlug}
-                />
-              </div>
-            ) : documentType === 'html' ? (
-              <div className='flex-1 min-h-0 h-full relative overflow-hidden'>
-                <HtmlEditor
-                  content={currentJsonContent}
-                  onChange={onJsonContentChange}
-                  readOnly={!hasEditPermission}
-                  slug={documentSlug}
-                />
-              </div>
-            ) : (
-              <div className='flex-1 relative flex flex-col h-full'>
-                <div className='flex-1 relative'>
-                  <JsonEditor
-                    className='pt-14 lg:pt-0'
-                    defaultValue={currentJsonContent} // Initial Load Only
-                    remoteValue={syncedRemoteContent} // Updates Only
+                documentType !== 'json'
+                  ? 'w-full'
+                  : 'w-full lg:w-(--left-panel-width) lg:min-w-75',
+                mobileTab === 'editor' ? 'flex' : 'hidden lg:flex'
+              )}
+            >
+              {documentType === 'text' ? (
+                <div className='flex-1 h-full relative'>
+                  <RichTextEditor
+                    content={currentJsonContent}
                     onChange={onJsonContentChange}
-                    onReady={() => setIsEditorReady(true)}
-                    onValidate={handleEditorValidation}
                     readOnly={!hasEditPermission}
+                    remoteContent={syncedRemoteContent?.code}
+                    forceLightMode={false}
+                    isCurrentUserOwner={isCurrentUserOwner}
+                    slug={documentSlug}
+                  />
+                </div>
+              ) : documentType === 'markdown' ? (
+                <div className='flex-1 h-full relative'>
+                  <MarkdownEditor
+                    content={currentJsonContent}
+                    onChange={onJsonContentChange}
+                    readOnly={!hasEditPermission || isMarkdownPreviewOnlyShare}
                     onFileDrop={processSelectedFile}
                     slug={documentSlug}
-                    options={{
-                      padding: { top: 16, bottom: 100 }, // Ensure last lines are visible above floating alert
-                    }}
+                    sharePreviewOnly={isMarkdownPreviewOnlyShare}
                   />
+                </div>
+              ) : documentType === 'html' ? (
+                <div className='flex-1 min-h-0 h-full relative overflow-hidden'>
+                  <HtmlEditor
+                    content={currentJsonContent}
+                    onChange={onJsonContentChange}
+                    readOnly={!hasEditPermission}
+                    slug={documentSlug}
+                  />
+                </div>
+              ) : (
+                <div className='flex-1 relative flex flex-col h-full'>
+                  <div className='flex-1 relative min-h-0'>
+                    <JsonEditor
+                      defaultValue={currentJsonContent} // Initial Load Only
+                      remoteValue={syncedRemoteContent} // Updates Only
+                      onChange={onJsonContentChange}
+                      onReady={() => setIsEditorReady(true)}
+                      onValidate={handleEditorValidation}
+                      readOnly={!hasEditPermission}
+                      onFileDrop={processSelectedFile}
+                      slug={documentSlug}
+                      showSidebarToggle
+                      isSidebarCollapsed={isLeftEditorCollapsed}
+                      onToggleSidebar={() => setIsLeftEditorCollapsed(true)}
+                      options={JSON_EDITOR_INPUT_OPTIONS}
+                    />
 
-                  {/* Error / Warning Alert Overlay */}
-                  {effectiveValidationError &&
-                    (!isDocValid ||
-                      effectiveValidationError.severity === 'warning') && (
-                      <div className='absolute bottom-4 left-4 right-4 lg:bottom-6 lg:left-8 lg:right-8 z-30 animate-in fade-in slide-in-from-bottom-2'>
-                        <div
-                          className={cn(
-                            'bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-3 lg:p-4 rounded-xl shadow-xl flex items-start gap-3 lg:gap-4 ring-1 ring-black/5 dark:ring-white/5 border',
-                            effectiveValidationError.severity === 'warning'
-                              ? 'border-amber-400 dark:border-amber-600/50'
-                              : 'border-red-200 dark:border-red-900/50'
-                          )}
-                        >
+                    {/* Error / Warning Alert Overlay */}
+                    {effectiveValidationError &&
+                      (!isDocValid ||
+                        effectiveValidationError.severity === 'warning') && (
+                        <div className='absolute bottom-4 left-4 right-4 lg:bottom-6 lg:left-8 lg:right-8 z-30 animate-in fade-in slide-in-from-bottom-2'>
                           <div
                             className={cn(
-                              'p-1.5 lg:p-2 rounded-lg shrink-0 shadow-sm border',
+                              'bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-3 lg:p-4 rounded-xl shadow-xl flex items-start gap-3 lg:gap-4 ring-1 ring-black/5 dark:ring-white/5 border',
                               effectiveValidationError.severity === 'warning'
-                                ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/30 text-amber-600 dark:text-amber-500'
-                                : 'bg-red-50 dark:bg-red-950/30 border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-500'
+                                ? 'border-amber-400 dark:border-amber-600/50'
+                                : 'border-red-200 dark:border-red-900/50'
                             )}
                           >
-                            <AlertCircle className='w-4 h-4 lg:w-5 lg:h-5' />
-                          </div>
-                          <div className='flex-1 min-w-0'>
-                            <div className='flex items-center justify-between gap-2 lg:gap-4'>
-                              <h4
-                                className={cn(
-                                  'text-xs lg:text-sm font-bold flex items-center gap-2',
-                                  effectiveValidationError.severity ===
-                                    'warning'
-                                    ? 'text-amber-800 dark:text-amber-400'
-                                    : 'text-zinc-900 dark:text-zinc-100'
-                                )}
-                              >
-                                {effectiveValidationError.severity === 'warning'
-                                  ? 'Warning'
-                                  : 'Invalid JSON'}
-                              </h4>
-                              {effectiveValidationError.line && (
-                                <span
-                                  className={cn(
-                                    'text-[10px] font-mono font-bold px-1.5 lg:px-2 py-0.5 rounded-full whitespace-nowrap shadow-sm border',
-                                    effectiveValidationError.severity ===
-                                      'warning'
-                                      ? 'text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-900/50'
-                                      : 'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 border-red-200 dark:border-red-900/50'
-                                  )}
-                                >
-                                  Line {effectiveValidationError.line}
-                                </span>
-                              )}
-                            </div>
-                            <p
+                            <div
                               className={cn(
-                                'text-[11px] lg:text-xs mt-1 lg:mt-1.5 font-mono break-words leading-relaxed border-l-2 pl-2 lg:pl-3',
+                                'p-1.5 lg:p-2 rounded-lg shrink-0 shadow-sm border',
                                 effectiveValidationError.severity === 'warning'
-                                  ? 'text-amber-700 dark:text-amber-400/80 border-amber-300 dark:border-amber-700/50'
-                                  : 'text-zinc-600 dark:text-zinc-400 border-red-200 dark:border-red-900/50'
+                                  ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/30 text-amber-600 dark:text-amber-500'
+                                  : 'bg-red-50 dark:bg-red-950/30 border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-500'
                               )}
                             >
-                              {effectiveValidationError.message}
-                            </p>
+                              <AlertCircle className='w-4 h-4 lg:w-5 lg:h-5' />
+                            </div>
+                            <div className='flex-1 min-w-0'>
+                              <div className='flex items-center justify-between gap-2 lg:gap-4'>
+                                <h4
+                                  className={cn(
+                                    'text-xs lg:text-sm font-bold flex items-center gap-2',
+                                    effectiveValidationError.severity ===
+                                      'warning'
+                                      ? 'text-amber-800 dark:text-amber-400'
+                                      : 'text-zinc-900 dark:text-zinc-100'
+                                  )}
+                                >
+                                  {effectiveValidationError.severity ===
+                                  'warning'
+                                    ? 'Warning'
+                                    : 'Invalid JSON'}
+                                </h4>
+                                {effectiveValidationError.line && (
+                                  <span
+                                    className={cn(
+                                      'text-[10px] font-mono font-bold px-1.5 lg:px-2 py-0.5 rounded-full whitespace-nowrap shadow-sm border',
+                                      effectiveValidationError.severity ===
+                                        'warning'
+                                        ? 'text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-900/50'
+                                        : 'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 border-red-200 dark:border-red-900/50'
+                                    )}
+                                  >
+                                    Line {effectiveValidationError.line}
+                                  </span>
+                                )}
+                              </div>
+                              <p
+                                className={cn(
+                                  'text-[11px] lg:text-xs mt-1 lg:mt-1.5 font-mono wrap-break-word leading-relaxed border-l-2 pl-2 lg:pl-3',
+                                  effectiveValidationError.severity ===
+                                    'warning'
+                                    ? 'text-amber-700 dark:text-amber-400/80 border-amber-300 dark:border-amber-700/50'
+                                    : 'text-zinc-600 dark:text-zinc-400 border-red-200 dark:border-red-900/50'
+                                )}
+                              >
+                                {effectiveValidationError.message}
+                              </p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                  {/* Go to View Button (Mobile Only) */}
-                  <div className='lg:hidden absolute top-2 right-14 z-20'>
-                    <button
-                      onClick={() => setMobileTab('viewer')}
-                      className='flex items-center gap-2 px-3 py-1.5 bg-emerald-600 text-white rounded-full shadow-lg shadow-emerald-900/20 font-medium text-xs hover:bg-emerald-500 transition-transform active:scale-95 backdrop-blur-sm opacity-90 hover:opacity-100'
-                    >
-                      Go to View
-                      <ArrowRight size={14} />
-                    </button>
+                    {/* Go to View Button (Mobile Only) */}
+                    <div className='lg:hidden absolute top-11 right-2 z-20'>
+                      <button
+                        onClick={() => setMobileTab('viewer')}
+                        className='flex items-center gap-2 px-3 py-1.5 bg-emerald-600 text-white rounded-full shadow-lg shadow-emerald-900/20 font-medium text-xs hover:bg-emerald-500 transition-transform active:scale-95 backdrop-blur-sm opacity-90 hover:opacity-100'
+                      >
+                        Go to View
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* Resizer Handle */}
-          {documentType === 'json' && (
+          {documentType === 'json' && !isLeftEditorCollapsed && (
             <div
               className={`hidden lg:flex w-1 bg-transparent cursor-col-resize z-40 items-center justify-center transition-colors`}
               onMouseDown={startResizing}
@@ -1642,7 +2841,7 @@ export default function Home({
             </div>
           )}
 
-          {/* View Pane (Right/Bottom) — only for JSON type */}
+          {/* View Pane (Right/Bottom) — only for JSON type; stays visible when left collapses */}
           <div
             style={
               {
@@ -1651,30 +2850,35 @@ export default function Home({
             }
             className={cn(
               'bg-gray-50 dark:bg-[#050505] relative overflow-hidden h-full',
-              'w-full lg:w-[var(--right-panel-width)]',
-              // Mobile visibility toggle
-              mobileTab === 'viewer'
-                ? 'flex flex-col'
-                : documentType !== 'json'
-                  ? 'hidden'
-                  : 'hidden lg:flex lg:flex-col'
+              documentType !== 'json'
+                ? 'hidden'
+                : cn(
+                    isLeftEditorCollapsed
+                      ? 'w-full'
+                      : 'w-full lg:w-(--right-panel-width)',
+                    // Mobile tab switching
+                    mobileTab === 'viewer'
+                      ? 'flex flex-col'
+                      : 'hidden lg:flex lg:flex-col'
+                  )
             )}
           >
-            {/* Back to Editor Button (Mobile Only) */}
-            <div className='lg:hidden absolute top-2 right-10 z-[70]'>
-              <button
-                onClick={() => setMobileTab('editor')}
-                className='flex items-center gap-2 px-3 py-1.5 bg-zinc-800 dark:bg-zinc-700 text-white rounded-full shadow-lg font-medium text-xs hover:bg-zinc-700 dark:hover:bg-zinc-600 transition-transform active:scale-95 backdrop-blur-sm opacity-90 hover:opacity-100'
-              >
-                <Code2 size={14} />
-                Back to Editor
-              </button>
-            </div>
+            {/* Unified left icon rail — expand + view modes, centered on one axis */}
+            <div className='absolute top-3 left-3 z-50 flex w-9 flex-col items-center gap-3'>
+              {isLeftEditorCollapsed && (
+                <button
+                  type='button'
+                  onClick={() => setIsLeftEditorCollapsed(false)}
+                  title='Expand JSON editor'
+                  aria-label='Expand JSON editor'
+                  className='hidden lg:inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-white text-emerald-600 shadow-lg backdrop-blur-sm hover:bg-emerald-50 hover:border-emerald-300 transition-colors dark:border-zinc-800 dark:bg-zinc-900 dark:text-emerald-400 dark:hover:bg-emerald-950/40 dark:hover:border-emerald-700'
+                >
+                  <PanelLeftOpen size={16} />
+                </button>
+              )}
 
-            {/* Navigation: Sidebar for Graph/Formatter/Tree */}
-            <div className='absolute top-4 left-4 z-50 flex flex-col gap-3'>
               {/* Formatter View Button */}
-              <div className='relative group'>
+              <div className='relative group flex h-9 w-9 shrink-0 items-center justify-center'>
                 <button
                   onClick={() => {
                     setCurrentViewMode('formatter')
@@ -1691,13 +2895,13 @@ export default function Home({
                     )
                   }}
                   className={cn(
-                    'p-2 rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
+                    'inline-flex h-9 w-9 items-center justify-center rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
                     currentViewMode === 'formatter'
-                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20 scale-105'
-                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200 hover:scale-105'
+                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20'
+                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200'
                   )}
                 >
-                  <Code2 size={18} />
+                  <Code2 size={16} />
                 </button>
                 <div className='absolute left-full top-1/2 -translate-y-1/2 ml-3 px-2 py-1 bg-zinc-900 dark:bg-zinc-800 text-white dark:text-zinc-200 text-xs font-medium rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap shadow-xl border border-zinc-800 dark:border-zinc-700'>
                   JSON Formatter
@@ -1705,7 +2909,7 @@ export default function Home({
               </div>
 
               {/* Graph View Button */}
-              <div className='relative group'>
+              <div className='relative group flex h-9 w-9 shrink-0 items-center justify-center'>
                 <button
                   onClick={() => {
                     setCurrentViewMode('visualize')
@@ -1722,22 +2926,21 @@ export default function Home({
                     )
                   }}
                   className={cn(
-                    'p-2 rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
+                    'inline-flex h-9 w-9 items-center justify-center rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
                     currentViewMode === 'visualize'
-                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20 scale-105'
-                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200 hover:scale-105'
+                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20'
+                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200'
                   )}
                 >
-                  <GitGraph size={18} />
+                  <GitGraph size={16} />
                 </button>
-                {/* Tooltip */}
                 <div className='absolute left-full top-1/2 -translate-y-1/2 ml-3 px-2 py-1 bg-zinc-900 dark:bg-zinc-800 text-white dark:text-zinc-200 text-xs font-medium rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap shadow-xl border border-zinc-800 dark:border-zinc-700'>
                   Graph View
                 </div>
               </div>
 
               {/* Tree View Button */}
-              <div className='relative group'>
+              <div className='relative group flex h-9 w-9 shrink-0 items-center justify-center'>
                 <button
                   onClick={() => {
                     setCurrentViewMode('tree')
@@ -1754,18 +2957,29 @@ export default function Home({
                     )
                   }}
                   className={cn(
-                    'p-2 rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
+                    'inline-flex h-9 w-9 items-center justify-center rounded-full shadow-lg border backdrop-blur-sm transition-all duration-200',
                     currentViewMode === 'tree'
-                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20 scale-105'
-                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200 hover:scale-105'
+                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-900/20'
+                      : 'bg-white/80 dark:bg-zinc-900/80 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200'
                   )}
                 >
-                  <LayoutTemplate size={18} />
+                  <LayoutTemplate size={16} />
                 </button>
                 <div className='absolute left-full top-1/2 -translate-y-1/2 ml-3 px-2 py-1 bg-zinc-900 dark:bg-zinc-800 text-white dark:text-zinc-200 text-xs font-medium rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap shadow-xl border border-zinc-800 dark:border-zinc-700'>
                   Tree Explorer
                 </div>
               </div>
+            </div>
+
+            {/* Back to Editor Button (Mobile Only) */}
+            <div className='lg:hidden absolute top-2 right-10 z-70'>
+              <button
+                onClick={() => setMobileTab('editor')}
+                className='flex items-center gap-2 px-3 py-1.5 bg-zinc-800 dark:bg-zinc-700 text-white rounded-full shadow-lg font-medium text-xs hover:bg-zinc-700 dark:hover:bg-zinc-600 transition-transform active:scale-95 backdrop-blur-sm opacity-90 hover:opacity-100'
+              >
+                <Code2 size={14} />
+                Back to Editor
+              </button>
             </div>
             {/* Output Panel: only render after editor mounted and (if graph mode) layout is computed */}
             {isEditorReady &&
@@ -1843,7 +3057,7 @@ export default function Home({
                       currentViewMode !== 'formatter' && 'hidden'
                     )}
                   >
-                    <div className='flex items-center justify-between pl-4 pr-4 py-1 bg-gradient-to-b from-gray-50 to-gray-100 dark:from-zinc-800 dark:to-zinc-900 border-b border-zinc-300 dark:border-zinc-700 h-11 shrink-0 ml-16'>
+                    <div className='flex items-center justify-between pl-4 pr-4 py-1 bg-linear-to-b from-gray-50 to-gray-100 dark:from-zinc-800 dark:to-zinc-900 border-b border-zinc-300 dark:border-zinc-700 h-11 shrink-0 ml-16'>
                       <div className='flex items-center gap-2'>
                         <span className='text-sm font-semibold text-zinc-500 dark:text-zinc-400 whitespace-nowrap'>
                           JSON Formatter
@@ -1879,7 +3093,7 @@ export default function Home({
                     <div className='flex-1 ml-16'>
                       <JsonEditor
                         defaultValue={formattedOutput}
-                        remoteValue={{ code: formattedOutput, nonce: 0 }}
+                        remoteValue={formatterRemoteValue}
                         onChange={() => {}}
                         readOnly={true}
                         className='rounded-none border-0 shadow-none'
@@ -1897,14 +3111,14 @@ export default function Home({
         title={alertState.title}
         message={alertState.message}
         type={alertState.type}
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
 
       <Toast
         isOpen={toastState.isOpen}
         message={toastState.message}
         onClose={() => setToastState((prev) => ({ ...prev, isOpen: false }))}
-        forceLightMode={documentType === 'text'}
+        forceLightMode={false}
       />
 
       {/* Upload Modal */}
@@ -1985,53 +3199,46 @@ export default function Home({
         </div>
       )}
 
-      {/* Unlock Modal */}
-      {isPasswordLocked && (
-        <div
-          className={cn(
-            'fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4',
-            documentType === 'text'
-              ? 'bg-white/80'
-              : 'bg-white/80 dark:bg-black/80'
-          )}
-        >
-          <div
-            className={cn(
-              'w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl',
-              documentType === 'text'
-                ? 'bg-white border-zinc-200'
-                : 'bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800'
-            )}
-          >
+      {/* Decryption Error Modal */}
+      {decryptionError && (
+        <div className='fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 bg-white/80 dark:bg-black/80'>
+          <div className='w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl animate-in zoom-in-95 bg-white dark:bg-zinc-950 border-red-200 dark:border-red-900/40'>
             <div className='flex flex-col items-center gap-2 text-center'>
-              <div
-                className={cn(
-                  'flex h-12 w-12 items-center justify-center rounded-full border',
-                  documentType === 'text'
-                    ? 'bg-zinc-100 border-zinc-200 text-zinc-500'
-                    : 'bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
-                )}
-              >
+              <div className='flex h-12 w-12 items-center justify-center rounded-full border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 text-red-500'>
                 <Lock size={20} />
               </div>
-              <h2
-                className={cn(
-                  'text-lg font-semibold',
-                  documentType === 'text'
-                    ? 'text-zinc-900'
-                    : 'text-zinc-900 dark:text-zinc-100'
-                )}
+              <h2 className='text-lg font-semibold text-zinc-900 dark:text-zinc-100'>
+                Decryption Failed
+              </h2>
+              <p className='text-sm leading-relaxed text-zinc-600 dark:text-zinc-400'>
+                {decryptionError}
+              </p>
+            </div>
+
+            <div className='pt-2 flex flex-col gap-2'>
+              <button
+                onClick={() => router.push('/editor')}
+                className='w-full rounded-lg bg-zinc-900 dark:bg-zinc-100 px-3 py-2 text-sm font-medium text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors'
               >
+                Create New Document
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unlock Modal — wait for owner-unlock check so owners never see a flash */}
+      {isPasswordLocked && !isOwnerUnlockPending && !decryptionError && (
+        <div className='fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-4 bg-white/80 dark:bg-black/80'>
+          <div className='w-full max-w-md space-y-4 rounded-xl border p-6 shadow-2xl bg-white dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800'>
+            <div className='flex flex-col items-center gap-2 text-center'>
+              <div className='flex h-12 w-12 items-center justify-center rounded-full border bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'>
+                <Lock size={20} />
+              </div>
+              <h2 className='text-lg font-semibold text-zinc-900 dark:text-zinc-100'>
                 Password Required
               </h2>
-              <p
-                className={cn(
-                  'text-sm',
-                  documentType === 'text'
-                    ? 'text-zinc-500'
-                    : 'text-zinc-500 dark:text-zinc-400'
-                )}
-              >
+              <p className='text-sm text-zinc-500 dark:text-zinc-400'>
                 This shared link is password protected. Please enter the
                 password to view.
               </p>
@@ -2044,12 +3251,7 @@ export default function Home({
                   placeholder='Enter password'
                   value={documentPassword}
                   onChange={(e) => setDocumentPassword(e.target.value)}
-                  className={cn(
-                    'w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/50 pr-10',
-                    documentType === 'text'
-                      ? 'bg-white border-zinc-200 text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500'
-                      : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-emerald-500'
-                  )}
+                  className='w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/50 pr-10 bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-emerald-500'
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleUnlockDocument()
                   }}
@@ -2057,11 +3259,7 @@ export default function Home({
                 <button
                   type='button'
                   onClick={() => setIsPasswordVisible(!isPasswordVisible)}
-                  className={cn(
-                    'absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-700 transition-colors',
-                    documentType !== 'text' &&
-                      'dark:text-zinc-400 dark:hover:text-zinc-200'
-                  )}
+                  className='absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:text-zinc-200'
                 >
                   {isPasswordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -2076,12 +3274,7 @@ export default function Home({
               <div className='flex items-center gap-3'>
                 <button
                   onClick={cancelUnlockAttempt}
-                  className={cn(
-                    'flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors',
-                    documentType === 'text'
-                      ? 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900'
-                      : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
-                  )}
+                  className='flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
                 >
                   Cancel
                 </button>
@@ -2108,7 +3301,8 @@ export default function Home({
         onOpenDocument={handleOpenLocalDocument}
         onDeleteDocument={handleDeleteLocalDocument}
         onClearAll={handleClearLocalDocuments}
-        forceLightMode={documentType === 'text'}
+        onRenameDocument={handleRenameLocalDocument}
+        forceLightMode={false}
       />
 
       <SharePopover
@@ -2117,11 +3311,32 @@ export default function Home({
         defaultAccessLevel={userAccessLevel}
         defaultIsPrivate={isDocumentPrivate}
         defaultPassword={documentPassword}
+        defaultPreviewOnly={isPreviewOnly}
+        documentType={documentType}
+        documentTitle={deriveDocumentTitle(
+          currentJsonContent,
+          documentType === 'text' ||
+            documentType === 'markdown' ||
+            documentType === 'html' ||
+            documentType === 'json'
+            ? documentType
+            : 'json'
+        )}
         hasPermissionToConfigure={isCurrentUserOwner}
         isPrivacyLocked={isPrivacyLocked}
         onSaveShareSettings={handleShareDocument}
+        onSendShareEmail={handleSendShareEmail}
         isSavingSettings={isAutoSaving}
-        forceLightMode={documentType === 'text'}
+        shareUrl={
+          typeof window !== 'undefined' && documentSlug
+            ? `${window.location.origin}${getEditorBasePath(documentType)}/${documentSlug}${
+                isDocumentPrivate
+                  ? ''
+                  : `#key=${activeKeyStringRef.current || (typeof window !== 'undefined' ? extractKeyFromFragment() || '' : '')}`
+              }`
+            : ''
+        }
+        forceLightMode={false}
       />
     </div>
   )

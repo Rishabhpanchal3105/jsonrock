@@ -33,34 +33,29 @@ const accessTypeSchema = Joi.string()
 // Validation schema for POST /api/share (create share)
 export const createShareSchema = {
   body: Joi.object({
+    schemaVersion: Joi.number().optional(),
     json: Joi.string().allow('').optional(),
+    ciphertext: Joi.string().allow('').optional(),
+    iv: Joi.string().allow('').optional(),
+    salt: Joi.string().allow('', null).optional(),
+    ownerKeyWrapped: Joi.string().allow('', null).optional(),
     mode: modeSchema,
     isPrivate: Joi.boolean().default(false),
     accessType: accessTypeSchema,
-    password: Joi.string()
-      .min(4)
-      .when('isPrivate', {
-        is: true,
-        then: Joi.required(),
-        otherwise: Joi.optional(),
-      })
-      .messages({
-        'string.min': 'Password must be at least 4 characters',
-        'any.required': 'Password is required for private links',
-      }),
+    previewOnly: Joi.boolean().default(false),
     type: typeSchema,
     slug: Joi.string().max(20).optional(),
   }),
 }
 
-// Validation schema for GET /api/share/:slug (get metadata)
+// Validation schema for GET /api/share/:slug (get metadata & ciphertext)
 export const getShareMetaSchema = {
   params: Joi.object({
     slug: slugSchema,
   }),
 }
 
-// Validation schema for POST /api/share/:slug (unlock private share)
+// Validation schema for POST /api/share/:slug (legacy password unlock)
 export const unlockShareSchema = {
   params: Joi.object({
     slug: slugSchema,
@@ -78,22 +73,42 @@ export const updateShareSchema = {
     slug: slugSchema,
   }),
   body: Joi.object({
+    schemaVersion: Joi.number().optional(),
     json: Joi.string().allow('').optional(),
+    ciphertext: Joi.string().allow('').optional(),
+    iv: Joi.string().allow('').optional(),
+    salt: Joi.string().allow('', null).optional(),
+    ownerKeyWrapped: Joi.string().allow('', null).optional(),
     mode: modeSchema,
     isPrivate: Joi.boolean().default(false),
     accessType: accessTypeSchema,
-    password: Joi.string()
-      .min(4)
-      .when('isPrivate', {
-        is: true,
-        then: Joi.required(),
-        otherwise: Joi.optional().allow(null, ''),
-      })
-      .messages({
-        'string.min': 'Password must be at least 4 characters',
-        'any.required': 'Password is required for private links',
-      }),
+    previewOnly: Joi.boolean().optional(),
     type: typeSchema,
+  }),
+}
+
+// Validation schema for POST /api/share/email
+export const shareEmailSchema = {
+  body: Joi.object({
+    recipientEmail: Joi.string().email().required().messages({
+      'string.email': 'A valid recipient email address is required',
+      'any.required': 'Recipient email is required',
+    }),
+    shareUrl: Joi.string()
+      .pattern(/^https?:\/\/\S+$/i)
+      .required()
+      .messages({
+        'string.pattern.base': 'A valid share URL is required',
+        'any.required': 'Share URL is required',
+      }),
+    documentTitle: Joi.string().max(200).allow('').default('Untitled document'),
+  }),
+}
+
+// Validation schema for GET /api/share/:slug/owner-unlock
+export const ownerUnlockSchema = {
+  params: Joi.object({
+    slug: slugSchema,
   }),
 }
 
@@ -101,8 +116,5 @@ export const updateShareSchema = {
 export const getRawShareSchema = {
   params: Joi.object({
     slug: slugSchema,
-  }),
-  query: Joi.object({
-    password: Joi.string().optional(),
   }),
 }

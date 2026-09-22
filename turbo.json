@@ -9,7 +9,15 @@
     },
     "lint": {
       "dependsOn": ["^lint"],
-      "env": ["NODE_ENV", "PORT", "MONGODB_URI"]
+      "env": [
+        "NODE_ENV",
+        "PORT",
+        "MONGODB_URI",
+        "CLERK_SECRET_KEY",
+        "CLERK_PUBLISHABLE_KEY",
+        "CLERK_WEBHOOK_SECRET",
+        "SITE_URL"
+      ]
     },
     "check-types": {
       "dependsOn": ["^check-types"]

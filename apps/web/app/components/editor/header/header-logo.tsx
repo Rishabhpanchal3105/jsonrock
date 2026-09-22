@@ -1,7 +1,6 @@
 'use client'
 
 import { ShareType } from '@/app/iterface'
-import { cn } from '@/lib/utils'
 import Image from 'next/image'
 
 interface Props {
@@ -46,20 +45,14 @@ const HeaderLogo = ({ type, slug, isValid, viewMode }: Props) => {
           height={24}
           src='/jsonrock-dark.svg'
           alt='JSONROCK'
-          className={cn(
-            'h-5 sm:h-6 w-auto',
-            type !== 'text' ? 'block dark:hidden' : 'block'
-          )}
+          className='h-5 sm:h-6 w-auto block dark:hidden'
         />
         <Image
           width={24}
           height={24}
           src='/jsonrock-light.svg'
           alt='JSONROCK'
-          className={cn(
-            'h-5 sm:h-6 w-auto',
-            type !== 'text' ? 'hidden dark:block' : 'hidden'
-          )}
+          className='h-5 sm:h-6 w-auto hidden dark:block'
         />
       </div>
       {!isValid && type === 'json' && (

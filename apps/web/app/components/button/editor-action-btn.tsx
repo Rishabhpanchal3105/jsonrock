@@ -19,7 +19,6 @@ interface Props {
 const EditorActionBtn = ({
   onClick,
   href,
-  documentType,
   label,
   title,
   icon,
@@ -35,8 +34,7 @@ const EditorActionBtn = ({
       ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-900/20'
       : cn(
           'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200',
-          documentType !== 'text' &&
-            'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+          'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
         )
   )
 

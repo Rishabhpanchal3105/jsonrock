@@ -7,12 +7,30 @@ export type ShareType = 'json' | 'text' | 'markdown' | 'html'
 
 export interface IShareLink extends Document {
   slug: string
+  ownerId?: string // Clerk User ID
   type: ShareType
-  json: string
+  schemaVersion?: number // 1 = legacy plaintext, 2 = E2EE AES-256-GCM
+  json?: string // Legacy plaintext content
+  passwordHash?: string // Legacy SHA-256 password hash
+  ciphertext?: string
+  iv?: string
+  salt?: string
+  /**
+   * AES-256-GCM wrap of the content key, encrypted with a key derived from the
+   * owner's per-user keyWrapSecret. Only for password-protected docs with an owner.
+   * Useless without the wrap secret (never exposed on public GET).
+   */
+  ownerKeyWrapped?: string
+  /**
+   * Same wrap format as ownerKeyWrapped, stored for MCP-created documents so the
+   * owning account can rebuild a public share URL. Never returned by public APIs.
+   */
+  contentKeyWrapped?: string
   mode: JsonShareMode
   isPrivate: boolean
   accessType: ShareAccessType
-  passwordHash?: string
+  /** When true, markdown shares render as read-only preview for non-owners. */
+  previewOnly: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -20,8 +38,16 @@ export interface IShareLink extends Document {
 const ShareLinkSchema: Schema = new Schema(
   {
     slug: { type: String, required: true, unique: true },
+    ownerId: { type: String },
     type: { type: String, enum: ShareTypeEnum, default: ShareTypeEnum.JSON },
+    schemaVersion: { type: Number },
     json: { type: String },
+    passwordHash: { type: String },
+    ciphertext: { type: String },
+    iv: { type: String },
+    salt: { type: String },
+    ownerKeyWrapped: { type: String },
+    contentKeyWrapped: { type: String },
     mode: {
       type: String,
       enum: ModeEnum,
@@ -33,7 +59,7 @@ const ShareLinkSchema: Schema = new Schema(
       enum: AccessTypeEnum,
       default: AccessTypeEnum.VIEWER,
     },
-    passwordHash: { type: String },
+    previewOnly: { type: Boolean, default: false },
   },
   { timestamps: true }
 )
@@ -43,6 +69,8 @@ ShareLinkSchema.index(
   { createdAt: 1 },
   { expireAfterSeconds: 30 * 24 * 60 * 60 }
 )
+
+ShareLinkSchema.index({ ownerId: 1, updatedAt: -1 })
 
 export default mongoose.model<IShareLink>(
   'ShareLink',

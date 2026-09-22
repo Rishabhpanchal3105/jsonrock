@@ -17,17 +17,17 @@ Express + Socket.io backend for JSONROCK: REST API for shared JSON/text, file up
 
 ## Tech stack
 
-- [Node.js](https://nodejs.org/) ≥ 24  
-- [Express 5](https://expressjs.com/), [Socket.io](https://socket.io/)  
-- [MongoDB](https://www.mongodb.com/) via [Mongoose](https://mongoosejs.com/)  
-- [Joi](https://joi.dev/) (validation), [Winston](https://github.com/winstonjs/winston) (logging), [Multer](https://github.com/expressjs/multer) (upload)  
+- [Node.js](https://nodejs.org/) ≥ 24
+- [Express 5](https://expressjs.com/), [Socket.io](https://socket.io/)
+- [MongoDB](https://www.mongodb.com/) via [Mongoose](https://mongoosejs.com/)
+- [Joi](https://joi.dev/) (validation), [Winston](https://github.com/winstonjs/winston) (logging), [Multer](https://github.com/expressjs/multer) (upload)
 
 ---
 
 ## Prerequisites
 
-- Node.js ≥ 24  
-- pnpm ≥ 10  
+- Node.js ≥ 24
+- pnpm ≥ 10
 - MongoDB (local or [Atlas](https://www.mongodb.com/cloud/atlas))
 
 ---
@@ -69,59 +69,83 @@ Base path: `/api` (e.g. `http://localhost:3005/api`).
 
 ### Share (CRUD + unlock)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/share` | Create a share. Body: `json`, `mode`, `isPrivate`, `accessType`, `password`, `type`, optional `slug`. Returns `{ slug, mode, type, isPrivate, accessType }`. |
-| `GET`  | `/share/:slug` | Get metadata (and data if not private). Returns `{ type, data?, slug, isPrivate, accessType, mode }`. For private, `data` is null until unlocked. |
-| `POST` | `/share/:slug` | Unlock with password. Body: `{ password }`. Returns same shape as GET with `data` populated. |
-| `PUT`  | `/share/:slug` | Update share. Body: `json`, `mode`, `isPrivate`, `accessType`, `password`, `type`. Validates ownership/permissions. |
+| Method | Path           | Description                                                                                                                                                  |
+| ------ | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST` | `/share`       | Create a share. Body: `json`, `mode`, `isPrivate`, `accessType`, `password`, `type`, optional `slug`. Returns `{ slug, mode, type, isPrivate, accessType }`. |
+| `GET`  | `/share/:slug` | Get metadata (and data if not private). Returns `{ type, data?, slug, isPrivate, accessType, mode }`. For private, `data` is null until unlocked.            |
+| `POST` | `/share/:slug` | Unlock with password. Body: `{ password }`. Returns same shape as GET with `data` populated.                                                                 |
+| `PUT`  | `/share/:slug` | Update share. Body: `json`, `mode`, `isPrivate`, `accessType`, `password`, `type`. Validates ownership/permissions.                                          |
 
 ### Upload
 
-| Method | Path | Description |
-|--------|------|-------------|
+| Method | Path      | Description                                                          |
+| ------ | --------- | -------------------------------------------------------------------- |
 | `POST` | `/upload` | Upload a JSON file (form field `file`). Max 2MB. Returns `{ slug }`. |
 
 ### Raw fetch
 
-| Method | Path | Description |
-|--------|------|-------------|
+| Method | Path     | Description                                                                                 |
+| ------ | -------- | ------------------------------------------------------------------------------------------- |
 | `GET`  | `/:slug` | Get raw content (parsed JSON or plain text). For private shares, use query `?password=...`. |
+
+---
+
+## MCP server
+
+Agents such as Claude, Cursor, and ChatGPT can publish a document and receive one shareable link.
+
+1. Sign in on the site and open `/account/mcp`.
+2. Create a token. The secret (`jr_mcp_…`) is shown once.
+3. Point the agent at `http://localhost:3005/mcp` (or your deployed API origin + `/mcp`) with `Authorization: Bearer <token>`.
+
+Tools: `create_share`, `update_share`, `change_share_access`, `read_share`, `list_shares`, `whoami`.
+
+`update_share` replaces document content only. `change_share_access` switches between viewer and editor access without reading, uploading, or re-encrypting the document.
+
+Content is encrypted with the same AES-256-GCM format the website uses. Public links include a `#key=` fragment. Set `SITE_URL` so returned links use the public site origin.
+
+Token management (Clerk session required):
+
+| Method   | Path                  | Description                                                            |
+| -------- | --------------------- | ---------------------------------------------------------------------- |
+| `GET`    | `/api/mcp/tokens`     | List active tokens (prefix only)                                       |
+| `POST`   | `/api/mcp/tokens`     | Create a token. Body: `{ "name": "Cursor" }`. Returns the secret once. |
+| `DELETE` | `/api/mcp/tokens/:id` | Revoke a token                                                         |
 
 ---
 
 ## Socket.io
 
-- **Path:** `/api/socket/io`  
-- **Events (client → server):**  
-  - `join-room` — payload: `slug` (string)  
-  - `leave-room` — payload: `slug`  
-  - `code-change` — payload: `{ slug, newCode }` (rate-limited; broadcast to room excluding sender)  
-- **Events (server → client):**  
-  - `code-change` — payload: `newCode` (string)  
-  - `error` — e.g. rate limit message  
+- **Path:** `/api/socket/io`
+- **Events (client → server):**
+  - `join-room` — payload: `slug` (string)
+  - `leave-room` — payload: `slug`
+  - `code-change` — payload: `{ slug, newCode }` (rate-limited; broadcast to room excluding sender)
+- **Events (server → client):**
+  - `code-change` — payload: `newCode` (string)
+  - `error` — e.g. rate limit message
 
 ---
 
 ## Environment variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `MONGODB_URI` | Yes | — | MongoDB connection string |
-| `PORT` | No | 3005 | HTTP server port |
+| Variable      | Required | Default | Description               |
+| ------------- | -------- | ------- | ------------------------- |
+| `MONGODB_URI` | Yes      | —       | MongoDB connection string |
+| `PORT`        | No       | 3005    | HTTP server port          |
 
 ---
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `pnpm run dev` | Start with nodemon (watch) |
-| `pnpm run build` | Compile TypeScript to `dist/` |
-| `pnpm run start` | Run `node dist/index.js` |
-| `pnpm run lint` | Run ESLint |
-| `pnpm run lint:fix` | ESLint with auto-fix |
-| `pnpm run format` | Prettier format |
+| Command             | Description                   |
+| ------------------- | ----------------------------- |
+| `pnpm run dev`      | Start with nodemon (watch)    |
+| `pnpm run build`    | Compile TypeScript to `dist/` |
+| `pnpm run start`    | Run `node dist/index.js`      |
+| `pnpm run lint`     | Run ESLint                    |
+| `pnpm run lint:fix` | ESLint with auto-fix          |
+| `pnpm run format`   | Prettier format               |
 
 ---
 
@@ -129,16 +153,16 @@ Base path: `/api` (e.g. `http://localhost:3005/api`).
 
 Collection: `share_links`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `slug` | string | Unique URL-safe id |
-| `type` | enum | `json` \| `text` |
-| `json` | string | Content (JSON string or plain text) |
-| `mode` | enum | `visualize` \| `tree` \| `formatter` |
-| `isPrivate` | boolean | Requires password to view |
-| `accessType` | enum | `editor` \| `viewer` |
-| `passwordHash` | string? | Hashed password when `isPrivate` |
-| `createdAt` / `updatedAt` | date | Timestamps; TTL index on `createdAt` (e.g. 30 days) |
+| Field                     | Type    | Description                                         |
+| ------------------------- | ------- | --------------------------------------------------- |
+| `slug`                    | string  | Unique URL-safe id                                  |
+| `type`                    | enum    | `json` \| `text`                                    |
+| `json`                    | string  | Content (JSON string or plain text)                 |
+| `mode`                    | enum    | `visualize` \| `tree` \| `formatter`                |
+| `isPrivate`               | boolean | Requires password to view                           |
+| `accessType`              | enum    | `editor` \| `viewer`                                |
+| `passwordHash`            | string? | Hashed password when `isPrivate`                    |
+| `createdAt` / `updatedAt` | date    | Timestamps; TTL index on `createdAt` (e.g. 30 days) |
 
 ---
 
@@ -166,5 +190,5 @@ apps/server/
 
 ## Related docs
 
-- [Monorepo root README](../../README.md) — Install, scripts, env for the whole repo  
-- [Web app README](../web/README.md) — Frontend and how it uses this API  
+- [Monorepo root README](../../README.md) — Install, scripts, env for the whole repo
+- [Web app README](../web/README.md) — Frontend and how it uses this API
