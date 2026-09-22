@@ -41,6 +41,14 @@ export default function RootLayout({
       publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
     >
       <html lang='en' suppressHydrationWarning>
+        <head>
+          <Script
+            async
+            src='https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3686223382827680'
+            crossOrigin='anonymous'
+            strategy='afterInteractive'
+          />
+        </head>
         <body
           className={`${geistSans.variable} ${geistMono.variable} ${spaceGrotesk.variable} antialiased`}
         >
