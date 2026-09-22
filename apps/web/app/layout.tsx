@@ -48,7 +48,7 @@ export default function RootLayout({
             crossOrigin='anonymous'
             strategy='afterInteractive'
           />
-          <meta name="google-adsense-account" content="ca-pub-3686223382827680">
+          <meta name="google-adsense-account" content="ca-pub-3686223382827680"/>
         </head>
         <body
           className={`${geistSans.variable} ${geistMono.variable} ${spaceGrotesk.variable} antialiased`}
