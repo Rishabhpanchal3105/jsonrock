@@ -237,6 +237,20 @@ export default function Navbar() {
                       </Link>
                     )
                   })}
+                  <Link
+                    href='/account/mcp'
+                    onClick={() => setIsOpen(false)}
+                    className='flex items-center gap-3 px-5 py-3 text-zinc-700 hover:bg-[#00B3B7]/8 hover:text-[#00B3B7] transition-colors border-b border-zinc-100 cursor-pointer'
+                  >
+                    <Image
+                      src='/mcp.png'
+                      alt=''
+                      width={18}
+                      height={18}
+                      className='h-[18px] w-[18px] shrink-0 invert dark:invert-0'
+                    />
+                    <span className='font-medium text-[15px]'>MCP tokens</span>
+                  </Link>
                 </nav>
               </section>
             </div>

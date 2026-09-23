@@ -13,6 +13,7 @@ import { ThemeToggle } from '../components/button/theme-toggle'
 import HeaderLogo from '../components/editor/header/header-logo'
 import EditorActionBtn from '../components/button/editor-action-btn'
 import Link from 'next/link'
+import Image from 'next/image'
 import { FaGithub } from 'react-icons/fa6'
 import { useTransition } from 'react'
 import { useRouter } from 'next/navigation'
@@ -118,6 +119,24 @@ const DiffHeader = ({ isSaving }: DiffHeaderProps) => {
         <div className='dark:text-zinc-400'>
           <ThemeToggle />
         </div>
+
+        <Link
+          href='/account/mcp'
+          className={cn(
+            'p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-md transition-all flex items-center justify-center focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none',
+            'dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-800'
+          )}
+          title='MCP — create a token for AI agents'
+          aria-label='MCP tokens'
+        >
+          <Image
+            src='/mcp.png'
+            alt=''
+            width={18}
+            height={18}
+            className='h-[18px] w-[18px] invert dark:invert-0'
+          />
+        </Link>
 
         {/* Github */}
         <Link

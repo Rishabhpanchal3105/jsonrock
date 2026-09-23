@@ -11,6 +11,7 @@ import {
   GitCompareArrows,
   History,
   Home,
+  KeyRound,
   LinkIcon,
   Loader2,
   MoreHorizontal,
@@ -20,6 +21,7 @@ import HeaderLogo from './header/header-logo'
 import SaveStatus from './header/save-status'
 import EditorActionBtn from '../button/editor-action-btn'
 import Link from 'next/link'
+import Image from 'next/image'
 import { FaGithub } from 'react-icons/fa6'
 import { UserButton, useUser } from '@clerk/nextjs'
 import {
@@ -102,11 +104,10 @@ const HEADER_ACTIONS: HeaderAction[] = [
 
 const GAP_PX = 8
 
-const iconBtnClass = (documentType: ShareType) =>
+const iconBtnClass = () =>
   cn(
     'p-2 rounded-md transition-all focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 hover:cursor-pointer',
-    documentType !== 'text' &&
-      'dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-800'
+    'dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-800'
   )
 
 const EditorHeader = ({
@@ -288,8 +289,7 @@ const EditorHeader = ({
         ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-900/20'
         : cn(
             'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200',
-            documentType !== 'text' &&
-              'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+            'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
           )
     )
 
@@ -299,8 +299,7 @@ const EditorHeader = ({
       ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-900/20'
       : cn(
           'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200',
-          documentType !== 'text' &&
-            'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+          'dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
         )
   )
 
@@ -309,7 +308,7 @@ const EditorHeader = ({
       ref={headerRef}
       className={cn(
         'relative h-14 border-b border-zinc-200 flex items-center justify-between gap-2 px-2 sm:px-3 lg:px-6 bg-white shrink-0',
-        documentType !== 'text' && 'dark:border-zinc-900 dark:bg-zinc-950'
+        'dark:border-zinc-900 dark:bg-zinc-950'
       )}
     >
       {/* Hidden measurement row */}
@@ -414,7 +413,7 @@ const EditorHeader = ({
             }}
             className={cn(
               'z-200 min-w-48 max-w-[calc(100vw-1.5rem)] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl',
-              documentType !== 'text' && 'dark:border-zinc-800 dark:bg-zinc-950'
+              'dark:border-zinc-800 dark:bg-zinc-950'
             )}
           >
             {overflowActions.map((item) => (
@@ -425,8 +424,7 @@ const EditorHeader = ({
                 onClick={() => navigateTo(item.href)}
                 className={cn(
                   'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900 hover:cursor-pointer',
-                  documentType !== 'text' &&
-                    'dark:text-zinc-300 dark:hover:bg-zinc-900 dark:hover:text-zinc-100',
+                  'dark:text-zinc-300 dark:hover:bg-zinc-900 dark:hover:text-zinc-100',
                   item.activeType !== undefined &&
                     documentType === item.activeType &&
                     'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
@@ -450,13 +448,13 @@ const EditorHeader = ({
         <div
           className={cn(
             'h-5 w-px bg-zinc-200 mx-0.5 sm:mx-1',
-            documentType !== 'text' && 'dark:bg-zinc-800'
+            'dark:bg-zinc-800'
           )}
         />
 
         <button
           onClick={() => onOpenHistoryModal(true)}
-          className={iconBtnClass(documentType)}
+          className={iconBtnClass()}
           title='Open Local History'
           aria-label='Open Local History'
         >
@@ -476,7 +474,7 @@ const EditorHeader = ({
                 ? 'text-emerald-600 dark:text-emerald-400 cursor-wait opacity-80'
                 : cn(
                     'text-emerald-600 dark:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 cursor-pointer',
-                    documentType !== 'text' && 'dark:hover:text-emerald-400'
+                    'dark:hover:text-emerald-400'
                   )
           )}
           title={
@@ -504,16 +502,31 @@ const EditorHeader = ({
           )}
         </button>
 
-        <div className={cn(documentType !== 'text' && 'dark:text-zinc-400')}>
-          {documentType !== 'text' && <ThemeToggle />}
+        <div className='dark:text-zinc-400'>
+          <ThemeToggle />
         </div>
+
+        <Link
+          href='/account/mcp'
+          className={iconBtnClass()}
+          title='MCP — create a token for AI agents'
+          aria-label='MCP tokens'
+        >
+          <Image
+            src='/mcp.png'
+            alt=''
+            width={18}
+            height={18}
+            className='h-[18px] w-[18px] invert dark:invert-0'
+          />
+        </Link>
 
         <Link
           href='https://github.com/Softcolon-Technology/jsonrock'
           target='_blank'
           rel='noopener noreferrer'
           className={cn(
-            iconBtnClass(documentType),
+            iconBtnClass(),
             'hidden md:flex items-center justify-center'
           )}
           title='View Source on GitHub'
@@ -532,7 +545,7 @@ const EditorHeader = ({
             })
           }}
           className={cn(
-            iconBtnClass(documentType),
+            iconBtnClass(),
             'hidden sm:flex items-center justify-center'
           )}
           title='Go to Home'
@@ -543,7 +556,15 @@ const EditorHeader = ({
 
         {isSignedIn ? (
           <div className='flex items-center ml-1'>
-            <UserButton />
+            <UserButton>
+              <UserButton.MenuItems>
+                <UserButton.Link
+                  label='MCP tokens'
+                  labelIcon={<KeyRound size={16} />}
+                  href='/account/mcp'
+                />
+              </UserButton.MenuItems>
+            </UserButton>
           </div>
         ) : null}
       </div>

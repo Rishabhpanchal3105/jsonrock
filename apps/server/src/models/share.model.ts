@@ -21,6 +21,11 @@ export interface IShareLink extends Document {
    * Useless without the wrap secret (never exposed on public GET).
    */
   ownerKeyWrapped?: string
+  /**
+   * Same wrap format as ownerKeyWrapped, stored for MCP-created documents so the
+   * owning account can rebuild a public share URL. Never returned by public APIs.
+   */
+  contentKeyWrapped?: string
   mode: JsonShareMode
   isPrivate: boolean
   accessType: ShareAccessType
@@ -42,6 +47,7 @@ const ShareLinkSchema: Schema = new Schema(
     iv: { type: String },
     salt: { type: String },
     ownerKeyWrapped: { type: String },
+    contentKeyWrapped: { type: String },
     mode: {
       type: String,
       enum: ModeEnum,
@@ -63,6 +69,8 @@ ShareLinkSchema.index(
   { createdAt: 1 },
   { expireAfterSeconds: 30 * 24 * 60 * 60 }
 )
+
+ShareLinkSchema.index({ ownerId: 1, updatedAt: -1 })
 
 export default mongoose.model<IShareLink>(
   'ShareLink',
