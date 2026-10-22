@@ -22,7 +22,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
-import MarkdownPreviewEditor from './MarkdownPreviewEditor'
 import { MermaidDiagram, preloadMermaid } from './editor/MermaidDiagram'
 import { FencedCodeBlock } from './editor/FencedCodeBlock'
 import {
@@ -473,8 +472,10 @@ const buildMdComponents = (): React.ComponentProps<
     </blockquote>
   ),
   // ── Code (inline & fenced) ──────────────────────────────────────────────
+  // Fenced blocks are pre > code in react-markdown; Mermaid/FencedCodeBlock
+  // already draw their own card — `pre` must not add a second container.
   code: ({ className, children, ...props }: any) => {
-    const match = /language-(\w+)/.exec(className || '')
+    const match = /language-([\w-]+)/.exec(className || '')
     const lang = match?.[1]
     const codeString = String(children).replace(/\n$/, '')
 
@@ -486,6 +487,17 @@ const buildMdComponents = (): React.ComponentProps<
     // Fenced code block with language → minimal highlighted card
     if (lang) {
       return <FencedCodeBlock language={lang} code={codeString} />
+    }
+
+    // Untagged fence (still a block — className may be empty but multiline)
+    if (codeString.includes('\n')) {
+      return (
+        <pre className='relative my-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 p-5 min-h-28 overflow-x-auto text-zinc-800 dark:text-zinc-200 text-sm font-mono leading-relaxed'>
+          <code className='bg-transparent border-none p-0 text-inherit'>
+            {children}
+          </code>
+        </pre>
+      )
     }
 
     // Inline code
@@ -501,15 +513,10 @@ const buildMdComponents = (): React.ComponentProps<
       </code>
     )
   },
-  // pre is now handled by the code component wrapping it, but we keep a fallback
-  pre: ({ children }) => (
-    <pre className='relative bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4 my-4 overflow-x-auto text-zinc-800 dark:text-zinc-200 text-sm font-mono leading-relaxed shadow-sm [&>code]:bg-transparent! [&>code]:border-none! [&>code]:p-0! [&>code]:text-inherit! [&>code]:block!'>
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => <>{children}</>,
   hr: () => <hr className='my-6 border-zinc-200 dark:border-zinc-700' />,
   table: ({ children }) => (
-    <div className='my-4 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700'>
+    <div className='my-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700'>
       <table className='w-full text-sm text-left text-zinc-700 dark:text-zinc-300 border-collapse'>
         {children}
       </table>
@@ -520,19 +527,21 @@ const buildMdComponents = (): React.ComponentProps<
       {children}
     </thead>
   ),
-  tbody: ({ children }) => <tbody>{children}</tbody>,
+  tbody: ({ children }) => (
+    <tbody className='[&_tr:last-child>td]:border-b-0'>{children}</tbody>
+  ),
   tr: ({ children }) => (
     <tr className='bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors'>
       {children}
     </tr>
   ),
   th: ({ children }) => (
-    <th className='px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700'>
+    <th className='px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className='px-4 py-3 border border-zinc-200 dark:border-zinc-700'>
+    <td className='px-4 py-3 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
       {children}
     </td>
   ),
@@ -1172,44 +1181,35 @@ export default function MarkdownEditor({
             />
           )}
 
-          {effectivelyReadOnly ? (
-            <div
-              ref={previewRef}
-              className='h-full overflow-y-auto p-8 [overflow-anchor:none]'
-              onScroll={effectivelyCollapsed ? undefined : onPreviewScroll}
-            >
-              {debouncedContent.trim() ? (
-                <>
-                  {frontMatterBanner}
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[
-                      rehypeRaw,
-                      [rehypeSanitize, rehypeSchema],
-                      rehypeKatex,
-                      rehypeSlug,
-                    ]}
-                    components={mdComponents}
-                  >
-                    {markdownBody}
-                  </ReactMarkdown>
-                </>
-              ) : (
-                <div className='h-full flex items-center justify-center'>
-                  <p className='text-zinc-400 dark:text-zinc-600 text-sm italic'>
-                    Preview will appear here as you type...
-                  </p>
-                </div>
-              )}
-            </div>
-          ) : (
-            <MarkdownPreviewEditor
-              content={debouncedContent}
-              scrollRef={previewRef}
-              onScroll={effectivelyCollapsed ? undefined : onPreviewScroll}
-              frontMatterBanner={frontMatterBanner}
-            />
-          )}
+          <div
+            ref={previewRef}
+            className='h-full overflow-y-auto p-8 [overflow-anchor:none] select-text'
+            onScroll={effectivelyCollapsed ? undefined : onPreviewScroll}
+          >
+            {debouncedContent.trim() ? (
+              <>
+                {frontMatterBanner}
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[
+                    rehypeRaw,
+                    [rehypeSanitize, rehypeSchema],
+                    rehypeKatex,
+                    rehypeSlug,
+                  ]}
+                  components={mdComponents}
+                >
+                  {markdownBody}
+                </ReactMarkdown>
+              </>
+            ) : (
+              <div className='h-full flex items-center justify-center'>
+                <p className='text-zinc-400 dark:text-zinc-600 text-sm italic'>
+                  Preview will appear here as you type...
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

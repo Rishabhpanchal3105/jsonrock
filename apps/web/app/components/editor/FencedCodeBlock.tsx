@@ -82,11 +82,11 @@ export function FencedCodeBlock({
     <div
       className={cn(
         'my-4 rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-700',
-        'bg-[#fafafa] dark:bg-zinc-900 shadow-none',
+        'bg-[#fafafa] dark:bg-zinc-900 shadow-none min-h-28',
         className
       )}
     >
-      <div className='flex items-center justify-between gap-2 px-4 pt-3 pb-1'>
+      <div className='flex items-center justify-between gap-2 px-5 pt-4 pb-2'>
         <span className='text-xs font-medium lowercase text-zinc-400 dark:text-zinc-500 select-none'>
           {language}
         </span>
@@ -98,10 +98,11 @@ export function FencedCodeBlock({
         customStyle={{
           margin: 0,
           borderRadius: 0,
-          fontSize: '0.875rem',
-          lineHeight: 1.6,
-          padding: '0.25rem 1rem 1rem',
+          fontSize: '0.9rem',
+          lineHeight: 1.65,
+          padding: '0.35rem 1.25rem 1.25rem',
           background: 'transparent',
+          minHeight: '4.5rem',
         }}
         codeTagProps={{
           style: {

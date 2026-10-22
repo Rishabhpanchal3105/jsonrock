@@ -237,7 +237,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
 
   if (!svg) {
     return (
-      <pre className='bg-zinc-50 dark:bg-zinc-900/50 p-3 rounded text-sm text-zinc-500 italic border border-zinc-200 dark:border-zinc-800 my-3'>
+      <pre className='bg-zinc-50 dark:bg-zinc-900/50 p-5 rounded-xl text-sm text-zinc-500 italic border border-zinc-200 dark:border-zinc-800 my-4 min-h-24'>
         {isRendering ? 'Rendering diagram…' : 'Invalid Mermaid diagram'}
       </pre>
     )
@@ -247,13 +247,13 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     <div
       dangerouslySetInnerHTML={{ __html: svg }}
       className={cn(
-        'mermaid-diagram flex justify-center my-3 overflow-x-auto rounded-lg p-2 shadow-sm border',
+        'mermaid-diagram flex justify-center items-center my-4 overflow-x-auto rounded-xl p-6 min-h-40 w-full border border-zinc-200 dark:border-zinc-700',
         '[&_svg]:max-w-full [&_svg]:h-auto',
         '[&_.nodeLabel]:text-[10px] [&_.nodeLabel]:leading-snug',
         '[&_.edgeLabel]:text-[9px] [&_.edgeLabel]:leading-tight',
         '[&_foreignObject_div]:!p-0 [&_foreignObject_span]:!leading-snug',
         isRendering && 'opacity-90',
-        isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-zinc-200'
+        isDark ? 'bg-zinc-900' : 'bg-white'
       )}
     />
   )
