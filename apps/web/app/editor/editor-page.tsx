@@ -52,7 +52,7 @@ import { cn } from '@/lib/utils'
 import { useDebounce } from '@/hooks/useDebounce'
 import dynamic from 'next/dynamic'
 import EditorHeader from '../components/editor/editor-header'
-import { ShareType, getEditorBasePath } from '../iterface'
+import { ShareType, getEditorBasePath, buildDocumentUrl } from '../iterface'
 import {
   clearLocalDocuments,
   deleteLocalDocumentBySlug,
@@ -851,17 +851,12 @@ export default function Home({
   const restoreSessionUrl = useCallback((snapshot: EditorTabSnapshot) => {
     if (typeof window === 'undefined' || !snapshot.slug) return
 
-    const route = `${getEditorBasePath(snapshot.type)}/`
-    const viewParam =
-      snapshot.type === 'text' ||
-      snapshot.type === 'markdown' ||
-      snapshot.type === 'html'
-        ? ''
-        : `?view=${snapshot.viewMode}`
-    const fragment = snapshot.activeKeyString
-      ? `#key=${snapshot.activeKeyString}`
-      : ''
-    const newUrl = `${route}${snapshot.slug}${viewParam}${fragment}`
+    const newUrl = buildDocumentUrl({
+      type: snapshot.type,
+      slug: snapshot.slug,
+      viewMode: snapshot.viewMode,
+      keyString: snapshot.activeKeyString,
+    })
 
     const currentPath = window.location.pathname.replace(/\/$/, '') || '/'
     const basePath = getEditorBasePath(snapshot.type)
@@ -1274,11 +1269,12 @@ export default function Home({
   }, [])
 
   const getRouteForDocument = useCallback(
-    (type: ShareType, slug: string, mode?: JsonShareMode) => {
-      const basePath = `${getEditorBasePath(type)}/`
-      const viewParam = type === 'json' ? `?view=${mode || 'visualize'}` : ''
-      return `${basePath}${slug}${viewParam}`
-    },
+    (type: ShareType, slug: string, mode?: JsonShareMode) =>
+      buildDocumentUrl({
+        type,
+        slug,
+        viewMode: mode || 'visualize',
+      }),
     []
   )
 
@@ -1628,14 +1624,12 @@ export default function Home({
         lastPersistedContentRef.current = initialContent
 
         const resolvedType = (data.type || targetType) as ShareType
-        const route = `${getEditorBasePath(resolvedType)}/`
-        const viewParam =
-          resolvedType === 'text' ||
-          resolvedType === 'markdown' ||
-          resolvedType === 'html'
-            ? ''
-            : '?view=formatter'
-        const newUrl = `${route}${data.slug}${viewParam}#key=${keyString}`
+        const newUrl = buildDocumentUrl({
+          type: resolvedType,
+          slug: data.slug,
+          viewMode: 'formatter',
+          keyString,
+        })
 
         window.history.pushState(
           { ...window.history.state, as: newUrl, url: newUrl },
@@ -1743,16 +1737,13 @@ export default function Home({
 
           // Update URL in-place to include #key=... for public links
           if (!isDocumentPrivate) {
-            const resolvedType = documentType
-            const route = `${getEditorBasePath(resolvedType)}/`
-            const viewParam =
-              resolvedType === 'text' ||
-              resolvedType === 'markdown' ||
-              resolvedType === 'html'
-                ? ''
-                : `?view=${currentViewMode}`
             const currentKey = keyString || activeKeyStringRef.current || ''
-            const newUrl = `${route}${documentSlug}${viewParam}#key=${currentKey}`
+            const newUrl = buildDocumentUrl({
+              type: documentType,
+              slug: documentSlug,
+              viewMode: currentViewMode,
+              keyString: currentKey,
+            })
 
             window.history.replaceState(
               { ...window.history.state, as: newUrl, url: newUrl },
@@ -1932,14 +1923,12 @@ export default function Home({
       setDocumentSlug(data.slug)
       addOwnership(data.slug)
 
-      const routePrefix =
-        targetType === 'json'
-          ? '/editor/'
-          : targetType === 'markdown'
-            ? '/editor/markdown/'
-            : '/editor/text/'
-      const viewQuery = isJson ? '?view=formatter' : ''
-      const newUrl = `${routePrefix}${data.slug}${viewQuery}#key=${keyString}`
+      const newUrl = buildDocumentUrl({
+        type: targetType,
+        slug: data.slug,
+        viewMode: 'formatter',
+        keyString,
+      })
 
       window.history.pushState(
         { ...window.history.state, as: newUrl, url: newUrl },
@@ -2079,17 +2068,13 @@ export default function Home({
           setDocumentSlug(newSlug)
           addOwnership(newSlug)
 
-          const route = `${getEditorBasePath(documentType)}/`
-          const viewParam =
-            documentType === 'text' ||
-            documentType === 'markdown' ||
-            documentType === 'html'
-              ? ''
-              : `?view=${currentViewMode}`
-          const fragment = settings.isPrivateLink
-            ? ''
-            : `#key=${keyString || activeKeyStringRef.current || ''}`
-          const newUrl = `${route}${newSlug}${viewParam}${fragment}`
+          const newUrl = buildDocumentUrl({
+            type: documentType,
+            slug: newSlug,
+            viewMode: currentViewMode,
+            keyString: keyString || activeKeyStringRef.current || '',
+            isPrivate: settings.isPrivateLink,
+          })
 
           window.history.pushState(
             { ...window.history.state, as: newUrl, url: newUrl },
@@ -2108,11 +2093,14 @@ export default function Home({
         if (ownerKeyWrapped) setHasOwnerKeyWrapped(true)
         if (data.ownerId) setDocumentOwnerId(data.ownerId)
 
-        const route = `${getEditorBasePath(documentType)}/`
-        const fragment = settings.isPrivateLink
-          ? ''
-          : `#key=${keyString || activeKeyStringRef.current || ''}`
-        const link = `${window.location.origin}${route}${newSlug}${fragment}`
+        const link = buildDocumentUrl({
+          type: documentType,
+          slug: newSlug,
+          viewMode: currentViewMode,
+          keyString: keyString || activeKeyStringRef.current || '',
+          isPrivate: settings.isPrivateLink,
+          origin: window.location.origin,
+        })
 
         let message = copyToClipboard
           ? 'Settings saved and encrypted link copied to clipboard!'
@@ -2526,14 +2514,12 @@ export default function Home({
             lastPersistedContentRef.current = debouncedContentForAutoSave
 
             const resolvedType = (data.type || targetType) as ShareType
-            const route = `${getEditorBasePath(resolvedType)}/`
-            const viewParam =
-              resolvedType === 'text' ||
-              resolvedType === 'markdown' ||
-              resolvedType === 'html'
-                ? ''
-                : `?view=${currentViewMode}`
-            const newUrl = `${route}${data.slug}${viewParam}#key=${keyString}`
+            const newUrl = buildDocumentUrl({
+              type: resolvedType,
+              slug: data.slug,
+              viewMode: currentViewMode,
+              keyString,
+            })
 
             justAutoSavedSlugRef.current = data.slug
             window.history.replaceState(
@@ -3329,11 +3315,15 @@ export default function Home({
         isSavingSettings={isAutoSaving}
         shareUrl={
           typeof window !== 'undefined' && documentSlug
-            ? `${window.location.origin}${getEditorBasePath(documentType)}/${documentSlug}${
-                isDocumentPrivate
-                  ? ''
-                  : `#key=${activeKeyStringRef.current || (typeof window !== 'undefined' ? extractKeyFromFragment() || '' : '')}`
-              }`
+            ? buildDocumentUrl({
+                type: documentType,
+                slug: documentSlug,
+                viewMode: currentViewMode,
+                keyString:
+                  activeKeyStringRef.current || extractKeyFromFragment() || '',
+                isPrivate: isDocumentPrivate,
+                origin: window.location.origin,
+              })
             : ''
         }
         forceLightMode={false}
