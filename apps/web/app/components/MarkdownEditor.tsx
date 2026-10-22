@@ -8,19 +8,12 @@ import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
 import rehypeSlug from 'rehype-slug'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import {
-  vscDarkPlus,
-  oneLight,
-} from 'react-syntax-highlighter/dist/esm/styles/prism'
 import matter from 'gray-matter'
 import { useDebounce } from '@/hooks/useDebounce'
 import { cn } from '@/lib/utils'
 import {
   UploadCloud,
   Download,
-  Copy,
-  Check,
   List,
   X,
   Tag,
@@ -29,8 +22,13 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
-import mermaid from 'mermaid'
 import MarkdownPreviewEditor from './MarkdownPreviewEditor'
+import { MermaidDiagram, preloadMermaid } from './editor/MermaidDiagram'
+import { FencedCodeBlock } from './editor/FencedCodeBlock'
+import {
+  MarkdownFormatToolbar,
+  toggleInlineWrap,
+} from './editor/MarkdownFormatToolbar'
 
 const SOURCE_COLLAPSED_STORAGE_KEY = 'jsonrock_markdown_source_collapsed'
 
@@ -48,169 +46,6 @@ function writeSourceCollapsedPreference(collapsed: boolean) {
   } catch {
     // Ignore quota / private-mode failures — preference just won't persist.
   }
-}
-
-// ─── Mermaid Diagram ────────────────────────────────────────────────────────
-
-const mermaidCache = new Map<string, string>()
-const mermaidPrefixCache = new Map<string, string>()
-
-const getIsDarkMode = () =>
-  typeof document !== 'undefined' &&
-  document.documentElement.classList.contains('dark')
-
-const getMermaidConfig = (isDark: boolean) => ({
-  startOnLoad: false,
-  securityLevel: 'loose' as const,
-  theme: isDark ? ('dark' as const) : ('default' as const),
-  themeVariables: isDark
-    ? {
-        // Base
-        background: '#18181b',
-        primaryColor: '#27272a',
-        primaryTextColor: '#fafafa',
-        primaryBorderColor: '#a1a1aa',
-        secondaryColor: '#3f3f46',
-        secondaryTextColor: '#f4f4f5',
-        secondaryBorderColor: '#71717a',
-        tertiaryColor: '#27272a',
-        tertiaryTextColor: '#f4f4f5',
-        tertiaryBorderColor: '#52525b',
-        lineColor: '#a1a1aa',
-        textColor: '#fafafa',
-        mainBkg: '#27272a',
-        nodeBorder: '#a1a1aa',
-        clusterBkg: '#27272a',
-        titleColor: '#fafafa',
-        edgeLabelBackground: '#27272a',
-        // Sequence diagrams (arrows + labels were near-invisible on dark bg)
-        actorBkg: '#3f3f46',
-        actorBorder: '#a78bfa',
-        actorTextColor: '#fafafa',
-        actorLineColor: '#71717a',
-        signalColor: '#e4e4e7',
-        signalTextColor: '#fafafa',
-        labelBoxBkgColor: '#27272a',
-        labelBoxBorderColor: '#71717a',
-        labelTextColor: '#fafafa',
-        loopTextColor: '#fafafa',
-        noteBkgColor: '#3f3f46',
-        noteTextColor: '#fafafa',
-        noteBorderColor: '#71717a',
-        activationBkgColor: '#52525b',
-        activationBorderColor: '#a1a1aa',
-        sequenceNumberColor: '#18181b',
-      }
-    : undefined,
-})
-
-const Mermaid = ({ chart }: { chart: string }) => {
-  const prefix = chart.substring(0, 30)
-  const [isDark, setIsDark] = useState(getIsDarkMode)
-  const cacheKey = `${isDark ? 'dark' : 'light'}:${chart}`
-  const prefixKey = `${isDark ? 'dark' : 'light'}:${prefix}`
-
-  const [svg, setSvg] = useState<string>(() => {
-    return mermaidCache.get(cacheKey) || mermaidPrefixCache.get(prefixKey) || ''
-  })
-
-  // Keep theme in sync when the app toggles dark/light mode
-  useEffect(() => {
-    const syncTheme = () => setIsDark(getIsDarkMode())
-    syncTheme()
-    const observer = new MutationObserver(syncTheme)
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['class'],
-    })
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
-    if (mermaidCache.has(cacheKey)) {
-      setSvg(mermaidCache.get(cacheKey)!)
-      return
-    }
-
-    // Restore last valid diagram for this theme while typing (anti-blink)
-    const cachedPrefix = mermaidPrefixCache.get(prefixKey)
-    if (cachedPrefix) setSvg(cachedPrefix)
-
-    mermaid.initialize(getMermaidConfig(isDark))
-
-    let isMounted = true
-
-    const renderChart = async () => {
-      try {
-        await mermaid.parse(chart)
-        if (!isMounted) return
-        const renderId = `mermaid-${Math.random().toString(36).substring(2, 10)}`
-        const { svg: newSvg } = await mermaid.render(renderId, chart)
-        if (isMounted) {
-          mermaidCache.set(cacheKey, newSvg)
-          mermaidPrefixCache.set(prefixKey, newSvg)
-          setSvg(newSvg)
-        }
-      } catch {
-        // keep last valid svg on parse/render error
-      }
-    }
-
-    // Debounce while typing; re-theme immediately when dark/light toggles
-    const alreadyRendered =
-      mermaidCache.has(`dark:${chart}`) || mermaidCache.has(`light:${chart}`)
-    const timeoutId = setTimeout(renderChart, alreadyRendered ? 0 : 400)
-    return () => {
-      isMounted = false
-      clearTimeout(timeoutId)
-    }
-  }, [chart, cacheKey, prefixKey, isDark])
-
-  return svg ? (
-    <div
-      dangerouslySetInnerHTML={{ __html: svg }}
-      className={cn(
-        'flex justify-center my-4 overflow-x-auto rounded-lg p-4 shadow-sm border',
-        isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-zinc-200'
-      )}
-    />
-  ) : (
-    <pre className='bg-zinc-50 dark:bg-zinc-900/50 p-4 rounded text-sm text-zinc-500 italic border border-zinc-200 dark:border-zinc-800 my-4'>
-      Rendering diagram...
-    </pre>
-  )
-}
-
-// ─── Copy Button ─────────────────────────────────────────────────────────────
-
-const CopyButton = ({ code }: { code: string }) => {
-  const [copied, setCopied] = useState(false)
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(code)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {}
-  }
-  return (
-    <button
-      onClick={handleCopy}
-      title='Copy code'
-      className='absolute top-2.5 right-2.5 flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold uppercase tracking-wider transition-all duration-200 bg-zinc-700/60 hover:bg-zinc-600/80 text-zinc-300 hover:text-white border border-zinc-600/40'
-    >
-      {copied ? (
-        <>
-          <Check className='w-3 h-3' />
-          Copied
-        </>
-      ) : (
-        <>
-          <Copy className='w-3 h-3' />
-          Copy
-        </>
-      )}
-    </button>
-  )
 }
 
 // ─── Front-Matter Banner ─────────────────────────────────────────────────────
@@ -541,10 +376,6 @@ const handlePdfDownload = async (
 
 // ─── Markdown Components ─────────────────────────────────────────────────────
 
-const isDarkMode = () =>
-  typeof document !== 'undefined' &&
-  document.documentElement.classList.contains('dark')
-
 const buildMdComponents = (): React.ComponentProps<
   typeof ReactMarkdown
 >['components'] => ({
@@ -649,37 +480,12 @@ const buildMdComponents = (): React.ComponentProps<
 
     // Mermaid diagram
     if (lang === 'mermaid') {
-      return <Mermaid chart={codeString} />
+      return <MermaidDiagram chart={codeString} />
     }
 
-    // Fenced code block with language → syntax highlighting
+    // Fenced code block with language → minimal highlighted card
     if (lang) {
-      return (
-        <div className='relative my-4 rounded-lg overflow-hidden border border-zinc-700/50 shadow-md group'>
-          {/* Language badge */}
-          <div className='flex items-center justify-between px-4 py-1.5 bg-zinc-800 border-b border-zinc-700/50'>
-            <span className='text-[10px] font-bold uppercase tracking-widest text-zinc-400'>
-              {lang}
-            </span>
-          </div>
-          <CopyButton code={codeString} />
-          <SyntaxHighlighter
-            language={lang}
-            style={isDarkMode() ? vscDarkPlus : oneLight}
-            customStyle={{
-              margin: 0,
-              borderRadius: 0,
-              fontSize: '0.82rem',
-              padding: '1.1rem 1rem',
-              background: isDarkMode() ? '#1e1e1e' : '#fafafa',
-            }}
-            showLineNumbers
-            wrapLongLines={false}
-          >
-            {codeString}
-          </SyntaxHighlighter>
-        </div>
-      )
+      return <FencedCodeBlock language={lang} code={codeString} />
     }
 
     // Inline code
@@ -704,7 +510,7 @@ const buildMdComponents = (): React.ComponentProps<
   hr: () => <hr className='my-6 border-zinc-200 dark:border-zinc-700' />,
   table: ({ children }) => (
     <div className='my-4 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700'>
-      <table className='w-full text-sm text-left text-zinc-700 dark:text-zinc-300'>
+      <table className='w-full text-sm text-left text-zinc-700 dark:text-zinc-300 border-collapse'>
         {children}
       </table>
     </div>
@@ -714,22 +520,22 @@ const buildMdComponents = (): React.ComponentProps<
       {children}
     </thead>
   ),
-  tbody: ({ children }) => (
-    <tbody className='divide-y divide-zinc-200 dark:divide-zinc-700'>
-      {children}
-    </tbody>
-  ),
+  tbody: ({ children }) => <tbody>{children}</tbody>,
   tr: ({ children }) => (
     <tr className='bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors'>
       {children}
     </tr>
   ),
   th: ({ children }) => (
-    <th className='px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300'>
+    <th className='px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700'>
       {children}
     </th>
   ),
-  td: ({ children }) => <td className='px-4 py-3'>{children}</td>,
+  td: ({ children }) => (
+    <td className='px-4 py-3 border border-zinc-200 dark:border-zinc-700'>
+      {children}
+    </td>
+  ),
   img: ({ src, alt, title }) => (
     // eslint-disable-next-line @next/next/no-img-element
     <img
@@ -959,7 +765,12 @@ export default function MarkdownEditor({
   const containerRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const previewRef = React.useRef<HTMLDivElement>(null)
-  const isSyncing = React.useRef(false)
+  /** Which pane is driving scroll sync — blocks echo until the lock clears. */
+  const scrollDriverRef = React.useRef<'source' | 'preview' | null>(null)
+  const scrollUnlockTimerRef = React.useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null)
+  const scrollRafRef = React.useRef<number | null>(null)
 
   const effectivelyCollapsed = sharePreviewOnly || isSourceCollapsed
   const effectivelyReadOnly = readOnly || sharePreviewOnly
@@ -968,6 +779,11 @@ export default function MarkdownEditor({
     if (sharePreviewOnly) return
     setIsSourceCollapsed(readSourceCollapsedPreference())
   }, [sharePreviewOnly])
+
+  // Prefetch mermaid so the first diagram does not wait on the network chunk
+  useEffect(() => {
+    preloadMermaid()
+  }, [])
 
   const toggleSourceCollapsed = React.useCallback(() => {
     setIsSourceCollapsed((prev) => {
@@ -995,29 +811,65 @@ export default function MarkdownEditor({
   // Pre-build md components (stable ref avoids re-creating components on every render)
   const mdComponents = useMemo(() => buildMdComponents(), [])
 
-  // ── Scroll sync ────────────────────────────────────────────────────────────
+  // ── Scroll sync (rAF-throttled + driver lock to avoid jitter/echo) ─────────
+  const syncScrollPercent = React.useCallback(
+    (driver: 'source' | 'preview') => {
+      if (effectivelyCollapsed) return
+      const source = textareaRef.current
+      const preview = previewRef.current
+      if (!source || !preview) return
+
+      // Ignore echo events from the pane we just scrolled programmatically
+      if (scrollDriverRef.current && scrollDriverRef.current !== driver) return
+
+      const from = driver === 'source' ? source : preview
+      const to = driver === 'source' ? preview : source
+      const fromMax = from.scrollHeight - from.clientHeight
+      const toMax = to.scrollHeight - to.clientHeight
+      if (fromMax <= 0 || toMax <= 0) return
+
+      scrollDriverRef.current = driver
+      const pct = from.scrollTop / fromMax
+      to.scrollTop = pct * toMax
+
+      if (scrollUnlockTimerRef.current)
+        clearTimeout(scrollUnlockTimerRef.current)
+      // Keep lock past the browser's secondary scroll events
+      scrollUnlockTimerRef.current = setTimeout(() => {
+        scrollDriverRef.current = null
+        scrollUnlockTimerRef.current = null
+      }, 80)
+    },
+    [effectivelyCollapsed]
+  )
+
+  const scheduleScrollSync = React.useCallback(
+    (driver: 'source' | 'preview') => {
+      if (scrollRafRef.current != null)
+        cancelAnimationFrame(scrollRafRef.current)
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null
+        syncScrollPercent(driver)
+      })
+    },
+    [syncScrollPercent]
+  )
+
   const onTextareaScroll = React.useCallback(() => {
-    if (isSyncing.current || !textareaRef.current || !previewRef.current) return
-    isSyncing.current = true
-    const { scrollTop, scrollHeight, clientHeight } = textareaRef.current
-    const pct = scrollTop / (scrollHeight - clientHeight)
-    const preview = previewRef.current
-    preview.scrollTop = pct * (preview.scrollHeight - preview.clientHeight)
-    requestAnimationFrame(() => {
-      isSyncing.current = false
-    })
-  }, [])
+    scheduleScrollSync('source')
+  }, [scheduleScrollSync])
 
   const onPreviewScroll = React.useCallback(() => {
-    if (isSyncing.current || !textareaRef.current || !previewRef.current) return
-    isSyncing.current = true
-    const { scrollTop, scrollHeight, clientHeight } = previewRef.current
-    const pct = scrollTop / (scrollHeight - clientHeight)
-    const textarea = textareaRef.current
-    textarea.scrollTop = pct * (textarea.scrollHeight - textarea.clientHeight)
-    requestAnimationFrame(() => {
-      isSyncing.current = false
-    })
+    scheduleScrollSync('preview')
+  }, [scheduleScrollSync])
+
+  useEffect(() => {
+    return () => {
+      if (scrollUnlockTimerRef.current)
+        clearTimeout(scrollUnlockTimerRef.current)
+      if (scrollRafRef.current != null)
+        cancelAnimationFrame(scrollRafRef.current)
+    }
   }, [])
 
   // ── Resizing ───────────────────────────────────────────────────────────────
@@ -1054,7 +906,7 @@ export default function MarkdownEditor({
     }
   }, [isDragging, resize, stopResizing])
 
-  // ── Drag & Drop ────────────────────────────────────────────────────────────
+  // ── Drag & Drop (file import) ──────────────────────────────────────────────
   const handleDragOver = (e: React.DragEvent) => {
     if (readOnly) return
     e.preventDefault()
@@ -1128,7 +980,7 @@ export default function MarkdownEditor({
                   : 'Download Markdown (.md)'
               }
               className={cn(
-                'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors',
+                'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors cursor-pointer',
                 !slug
                   ? 'text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
                   : 'text-zinc-600 dark:text-zinc-400 hover:text-emerald-600 dark:hover:text-emerald-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50'
@@ -1137,12 +989,63 @@ export default function MarkdownEditor({
               <Download size={14} />
             </button>
           </div>
+          {!effectivelyReadOnly && (
+            <MarkdownFormatToolbar
+              textareaRef={textareaRef}
+              value={content}
+              onChange={onChange}
+            />
+          )}
           <textarea
             ref={textareaRef}
-            className='flex-1 w-full p-5 bg-white dark:bg-[#09090b] resize-none focus:outline-none dark:text-zinc-200 font-mono text-sm leading-7 caret-emerald-500 selection:bg-emerald-500/20 overflow-y-auto'
+            className='flex-1 w-full p-5 bg-white dark:bg-[#09090b] resize-none focus:outline-none dark:text-zinc-200 font-mono text-sm leading-7 caret-emerald-500 selection:bg-emerald-500/20 overflow-y-auto [overflow-anchor:none]'
             value={content}
             onChange={(e) => onChange(e.target.value)}
             onScroll={onTextareaScroll}
+            onKeyDown={(e) => {
+              if (effectivelyReadOnly) return
+              const mod = e.metaKey || e.ctrlKey
+              if (!mod) return
+              const el = textareaRef.current
+              if (!el) return
+              const start = el.selectionStart
+              const end = el.selectionEnd
+              const applyWrap = (marker: string, ph: string) => {
+                e.preventDefault()
+                const edit = toggleInlineWrap(content, start, end, marker, ph)
+                onChange(edit.next)
+                requestAnimationFrame(() => {
+                  el.focus()
+                  el.setSelectionRange(edit.selStart, edit.selEnd)
+                })
+              }
+              if (e.key === 'b') applyWrap('**', 'bold')
+              if (e.key === 'i') applyWrap('*', 'italic')
+              if (e.key === 'k') {
+                e.preventDefault()
+                let s = start
+                let en = end
+                while (s < en && /\s/.test(content[s]!)) s++
+                while (en > s && /\s/.test(content[en - 1]!)) en--
+                const leading = content.slice(start, s)
+                const trailing = content.slice(en, end)
+                const inner = content.slice(s, en) || 'link'
+                const next =
+                  content.slice(0, start) +
+                  leading +
+                  '[' +
+                  inner +
+                  '](https://)' +
+                  trailing +
+                  content.slice(end)
+                onChange(next)
+                requestAnimationFrame(() => {
+                  el.focus()
+                  const urlStart = start + leading.length + 1 + inner.length + 2
+                  el.setSelectionRange(urlStart, urlStart + 'https://'.length)
+                })
+              }
+            }}
             readOnly={effectivelyReadOnly}
             placeholder={
               '# Hello!\n\nStart writing markdown...\n\n- Use **bold**, *italic*\n- Add `code` blocks\n- Create tables, lists & more\n- Write $math$ or $$LaTeX$$\n- Draw ```mermaid diagrams```'
@@ -1185,7 +1088,7 @@ export default function MarkdownEditor({
               }
               aria-pressed={isSourceCollapsed}
               className={cn(
-                'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors',
+                'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors cursor-pointer',
                 isSourceCollapsed
                   ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-900/30'
                   : 'text-zinc-600 dark:text-zinc-400 hover:text-emerald-600 dark:hover:text-emerald-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50'
@@ -1228,7 +1131,7 @@ export default function MarkdownEditor({
                 : 'Download as PDF (.pdf)'
             }
             className={cn(
-              'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors',
+              'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors cursor-pointer',
               !slug
                 ? 'text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
                 : 'text-zinc-600 dark:text-zinc-400 hover:text-red-600 dark:hover:text-red-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50'
@@ -1249,7 +1152,7 @@ export default function MarkdownEditor({
                 : 'Download as Word Document (.doc)'
             }
             className={cn(
-              'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors',
+              'flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors cursor-pointer',
               !slug
                 ? 'text-zinc-400 dark:text-zinc-600 cursor-not-allowed'
                 : 'text-zinc-600 dark:text-zinc-400 hover:text-blue-600 dark:hover:text-blue-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50'
@@ -1272,8 +1175,8 @@ export default function MarkdownEditor({
           {effectivelyReadOnly ? (
             <div
               ref={previewRef}
-              className='h-full overflow-y-auto p-8'
-              onScroll={onPreviewScroll}
+              className='h-full overflow-y-auto p-8 [overflow-anchor:none]'
+              onScroll={effectivelyCollapsed ? undefined : onPreviewScroll}
             >
               {debouncedContent.trim() ? (
                 <>
@@ -1301,8 +1204,7 @@ export default function MarkdownEditor({
             </div>
           ) : (
             <MarkdownPreviewEditor
-              content={content}
-              onChange={onChange}
+              content={debouncedContent}
               scrollRef={previewRef}
               onScroll={effectivelyCollapsed ? undefined : onPreviewScroll}
               frontMatterBanner={frontMatterBanner}
