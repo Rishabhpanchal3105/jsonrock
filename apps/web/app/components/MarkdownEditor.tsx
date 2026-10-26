@@ -516,8 +516,8 @@ const buildMdComponents = (): React.ComponentProps<
   pre: ({ children }) => <>{children}</>,
   hr: () => <hr className='my-6 border-zinc-200 dark:border-zinc-700' />,
   table: ({ children }) => (
-    <div className='my-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700'>
-      <table className='w-full text-sm text-left text-zinc-700 dark:text-zinc-300 border-collapse'>
+    <div className='my-4 max-w-full overflow-x-auto overscroll-x-contain rounded-xl border border-zinc-200 dark:border-zinc-700'>
+      <table className='w-max min-w-full text-sm text-left text-zinc-700 dark:text-zinc-300 border-collapse'>
         {children}
       </table>
     </div>
@@ -536,12 +536,12 @@ const buildMdComponents = (): React.ComponentProps<
     </tr>
   ),
   th: ({ children }) => (
-    <th className='px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
+    <th className='whitespace-nowrap px-4 py-3 font-semibold text-zinc-700 dark:text-zinc-300 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className='px-4 py-3 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
+    <td className='whitespace-nowrap px-4 py-3 border-b border-r border-zinc-200 dark:border-zinc-700 last:border-r-0'>
       {children}
     </td>
   ),
