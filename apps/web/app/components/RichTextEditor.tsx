@@ -1259,7 +1259,7 @@ const RichTextEditor = ({
         resizable: true,
         HTMLAttributes: {
           class:
-            'border-collapse table-fixed w-full border border-zinc-300 dark:border-zinc-700 my-4',
+            'border-collapse w-max min-w-full border border-zinc-300 dark:border-zinc-700',
         },
       }),
       TableRow.configure({
@@ -1270,13 +1270,13 @@ const RichTextEditor = ({
       TableHeader.configure({
         HTMLAttributes: {
           class:
-            'border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 px-3 py-2 text-left font-semibold relative',
+            'whitespace-nowrap border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 px-3 py-2 text-left font-semibold relative',
         },
       }),
       TableCell.configure({
         HTMLAttributes: {
           class:
-            'border border-zinc-300 dark:border-zinc-700 px-3 py-2 relative',
+            'whitespace-nowrap border border-zinc-300 dark:border-zinc-700 px-3 py-2 relative',
         },
       }),
     ],
@@ -1352,6 +1352,13 @@ const RichTextEditor = ({
       }
     }
   }, [remoteContent, editor])
+
+  // TipTap only reads `editable` at create — sync when permission flips after mount.
+  React.useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    const next = !readOnly
+    if (editor.isEditable !== next) editor.setEditable(next)
+  }, [editor, readOnly])
 
   // Cleanup
   React.useEffect(() => {
